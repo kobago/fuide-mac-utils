@@ -1,0 +1,30 @@
+[package]
+name = "fuide-file-manager"
+description = "Finder-like file explorer with a Sci-Fi FUI look, built on egui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fuide-file-manager"
+path = "src/main.rs"
+
+[dependencies]
+egui = { workspace = true }
+eframe = { workspace = true }
+fuide = { workspace = true }
+chrono = "0.4"
+open = "5"
+libc = "0.2"
+trash = "5"
+
+# `cargo bundle --release --format dmg -p fuide-file-manager` (see scripts/release.sh)
+[package.metadata.bundle]
+name = "FUIDE File Manager"
+identifier = "fuide.file-manager"
+short_description = "Finder-like file browser with a Sci-Fi FUI look"
+# paths are resolved from the directory `cargo bundle` runs in (workspace root; see scripts/release.sh)
+icon = ["assets/icons/file-manager.svg"]
+category = "public.app-category.utilities"
+copyright = "Copyright (c) 2026 Go Kobayashi"
+osx_minimum_system_version = "13.0"

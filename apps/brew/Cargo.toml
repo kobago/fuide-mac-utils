@@ -1,0 +1,29 @@
+[package]
+name = "fuide-brew"
+description = "Homebrew front-end with a Sci-Fi FUI look, built on egui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fuide-brew"
+path = "src/main.rs"
+
+[dependencies]
+egui = { workspace = true }
+eframe = { workspace = true }
+fuide = { workspace = true }
+chrono = "0.4"
+open = "5"
+serde_json = "1"
+
+# `cargo bundle --release --format dmg -p fuide-brew` (see scripts/release.sh)
+[package.metadata.bundle]
+name = "FUIDE Brew"
+identifier = "fuide.brew"
+short_description = "Homebrew front-end with a Sci-Fi FUI look"
+# paths are resolved from the directory `cargo bundle` runs in (workspace root; see scripts/release.sh)
+icon = ["assets/icons/brew.svg"]
+category = "public.app-category.utilities"
+copyright = "Copyright (c) 2026 Go Kobayashi"
+osx_minimum_system_version = "13.0"
