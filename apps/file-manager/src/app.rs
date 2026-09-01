@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use egui::{pos2, vec2, Align2, Key, Rect, RichText, ScrollArea, Sense, Stroke, Ui};
 use fuide::widgets::{self, LogLine};
 use fuide::Dialog;
-use fuide::{mono, palette, theme, type_scale, Palette, Panel, Shell};
+use fuide::{
+    mono, palette, theme, type_scale, Palette, PaletteKind, Panel, Settings, SettingsWindow, Shell,
+};
 
 use crate::fs::{self, DiskInfo, Entry, Loader, OpChannel};
 
@@ -78,8 +80,12 @@ enum Action {
     Reveal(PathBuf),
     CopyPath(PathBuf),
     Sort(SortKey),
-    Palette(usize),
+    Palette(PaletteKind),
+    OpenSettings,
 }
+
+/// Settings file name (`Settings::path`).
+const APP_ID: &str = "file-manager";
 
 pub struct Explorer {
     loader: Loader,
@@ -101,7 +107,8 @@ pub struct Explorer {
     volumes: Vec<(String, PathBuf)>,
     last_error: Option<String>,
     load_ms: f32,
-    palette_idx: usize,
+    settings: Settings,
+    settings_win: SettingsWindow,
     scroll_to_selected: bool,
     dialog: Option<OpenDialog>,
     /// Errors waiting for the dialog slot (only one dialog at a time).
@@ -119,7 +126,13 @@ pub struct Explorer {
 
 impl Explorer {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::install(&cc.egui_ctx, Palette::cyan(), theme::macos_cjk_fallback());
+        let settings = Settings::load(APP_ID).unwrap_or_else(|| Settings::new(PaletteKind::Cyan));
+        theme::install(
+            &cc.egui_ctx,
+            settings.palette.palette(),
+            theme::macos_cjk_fallback(),
+        );
+        settings.apply(&cc.egui_ctx);
         // `fuide-file-manager [DIR]` starts in DIR; default is $HOME.
         let home = std::env::args()
             .nth(1)
@@ -147,7 +160,8 @@ impl Explorer {
             volumes: fs::volumes(),
             last_error: None,
             load_ms: 0.0,
-            palette_idx: 0,
+            settings,
+            settings_win: SettingsWindow::default(),
             scroll_to_selected: false,
             dialog: None,
             error_queue: std::collections::VecDeque::new(),
@@ -161,6 +175,10 @@ impl Explorer {
             devshot: fuide::devshot::DevShot::from_env(),
         };
         app.push_log(0.0, "file manager online :: fs link established", Level::Ok);
+        // Dev aid: `FUIDE_DEV_SETTINGS=1` opens the settings window at start (screenshots).
+        if std::env::var_os("FUIDE_DEV_SETTINGS").is_some() {
+            app.settings_win.open();
+        }
         if let Ok(text) = std::env::var("FUIDE_DEV_LOG") {
             app.push_log(0.0, text, Level::Danger);
         }
@@ -455,16 +473,30 @@ impl Explorer {
                 }
                 self.dirty = true;
             }
-            Action::Palette(i) => {
-                self.palette_idx = i;
-                let (name, pal) = match i {
-                    1 => ("amber", Palette::amber()),
-                    2 => ("green", Palette::green()),
-                    _ => ("cyan", Palette::cyan()),
-                };
-                theme::apply_palette(ctx, pal);
-                self.push_log(t, format!("palette // {name}"), Level::Warn);
+            Action::Palette(kind) => {
+                self.settings.palette = kind;
+                self.settings.apply(ctx);
+                self.settings_changed(t);
             }
+            Action::OpenSettings => self.settings_win.open(),
+        }
+    }
+
+    /// Log + persist after the settings changed (shortcut or settings window).
+    fn settings_changed(&mut self, t: f64) {
+        let s = &self.settings;
+        self.push_log(
+            t,
+            format!(
+                "settings // palette {} :: {} :: {}",
+                s.palette.name(),
+                if s.chamfer { "chamfer" } else { "square" },
+                if s.compact { "compact" } else { "normal" }
+            ),
+            Level::Warn,
+        );
+        if let Err(e) = self.settings.save(APP_ID) {
+            self.push_log(t, format!("settings // save failed: {e}"), Level::Danger);
         }
     }
 
@@ -523,14 +555,16 @@ impl Explorer {
             if cmd && i.key_pressed(Key::CloseBracket) {
                 actions.push(Action::Forward);
             }
-            if cmd && i.key_pressed(Key::Num1) {
-                actions.push(Action::Palette(0));
+            for (kind, key) in PaletteKind::ALL
+                .into_iter()
+                .zip([Key::Num1, Key::Num2, Key::Num3])
+            {
+                if cmd && i.key_pressed(key) {
+                    actions.push(Action::Palette(kind));
+                }
             }
-            if cmd && i.key_pressed(Key::Num2) {
-                actions.push(Action::Palette(1));
-            }
-            if cmd && i.key_pressed(Key::Num3) {
-                actions.push(Action::Palette(2));
+            if cmd && i.key_pressed(Key::Comma) {
+                actions.push(Action::OpenSettings);
             }
         });
     }
@@ -604,7 +638,8 @@ impl eframe::App for Explorer {
                 fps,
                 self.load_ms
             ))
-            .lamp(link_text, link_color, false);
+            .lamp(link_text, link_color, false)
+            .settings_button(true);
         if self.pending.is_some() {
             shell = shell.lamp("SCANNING", pal.warn, true);
         }
@@ -612,7 +647,7 @@ impl eframe::App for Explorer {
             shell = shell.lamp("FS WRITE", pal.warn, true);
         }
 
-        shell.show(ui, |ui| {
+        let out = shell.show_full(ui, |ui| {
             let c = ui.max_rect();
             let top = c.top() + 10.0; // room for title chips above the first panels
             let log_rect = Rect::from_min_max(pos2(c.left(), c.bottom() - LOG_H), c.max);
@@ -644,6 +679,9 @@ impl eframe::App for Explorer {
             self.ui_inspector(ui, right, &mut actions);
             self.ui_log(ui, log_rect, t);
         });
+        if out.settings_clicked {
+            actions.push(Action::OpenSettings);
+        }
 
         self.ui_dialog(&ctx, &mut actions);
         for a in actions {
@@ -651,6 +689,13 @@ impl eframe::App for Explorer {
         }
         if self.dirty {
             self.rebuild_view();
+        }
+        // Settings window (child viewport) last: it pauses this viewport while it draws.
+        if self
+            .settings_win
+            .show(&ctx, &mut self.settings, "FUIDE File Manager")
+        {
+            self.settings_changed(t);
         }
     }
 }
@@ -1301,7 +1346,7 @@ impl Explorer {
                     "KEYS :: UP/DN SELECT  ENTER OPEN  BKSP UP",
                     "CMD+[ / ]  MOUSE 4/5 :: HISTORY",
                     "CMD+R RENAME  CMD+BKSP TRASH  +OPT DELETE",
-                    "CMD+1..3 :: PALETTE",
+                    "CMD+1..3 PALETTE  CMD+, SETTINGS",
                 ];
                 let (fr, _) = ui.allocate_exact_size(
                     vec2(ui.available_width(), lh * hints.len() as f32),

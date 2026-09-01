@@ -4,6 +4,7 @@ mod app;
 mod brew;
 
 fn main() -> eframe::Result {
+    fuide::devshot::install_trace_logger();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("FUIDE Brew")

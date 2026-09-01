@@ -5,7 +5,9 @@ use std::collections::VecDeque;
 use egui::{pos2, vec2, Align2, Key, Rect, RichText, Sense, Ui};
 use fuide::table::{self, Cell, Column, TableState, Width};
 use fuide::widgets::{self, LogLine};
-use fuide::{mono, palette, theme, type_scale, Dialog, Palette, Panel, Shell};
+use fuide::{
+    mono, palette, theme, type_scale, Dialog, PaletteKind, Panel, Settings, SettingsWindow, Shell,
+};
 
 use crate::brew::{self, Brew, Kind, Msg, Package, Status, SystemInfo};
 
@@ -92,7 +94,11 @@ enum Action {
     Run(String, Vec<String>),
     CloseDialog,
     ConfirmDialog,
+    OpenSettings,
 }
+
+/// Settings file name (`Settings::path`).
+const APP_ID: &str = "brew";
 
 pub struct BrewApp {
     brew: Brew,
@@ -120,11 +126,19 @@ pub struct BrewApp {
     dev_search: Option<String>,
     dev_frame: u32,
     dev_close_frame: Option<u32>,
+    settings: Settings,
+    settings_win: SettingsWindow,
 }
 
 impl BrewApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::install(&cc.egui_ctx, Palette::amber(), theme::macos_cjk_fallback());
+        let settings = Settings::load(APP_ID).unwrap_or_else(|| Settings::new(PaletteKind::Amber));
+        theme::install(
+            &cc.egui_ctx,
+            settings.palette.palette(),
+            theme::macos_cjk_fallback(),
+        );
+        settings.apply(&cc.egui_ctx);
         let mut app = Self {
             brew: Brew::new(),
             packages: Vec::new(),
@@ -150,8 +164,14 @@ impl BrewApp {
             dev_close_frame: std::env::var("FUIDE_DEV_DIALOG_CLOSE")
                 .ok()
                 .and_then(|v| v.parse().ok()),
+            settings,
+            settings_win: SettingsWindow::default(),
         };
         app.push_log(0.0, "brew console online :: reading inventory", Level::Ok);
+        // Dev aid: `FUIDE_DEV_SETTINGS=1` opens the settings window at start (screenshots).
+        if std::env::var_os("FUIDE_DEV_SETTINGS").is_some() {
+            app.settings_win.open();
+        }
         if let Ok(text) = std::env::var("FUIDE_DEV_LOG") {
             app.push_log(0.0, text, Level::Danger);
         }
@@ -477,6 +497,25 @@ impl BrewApp {
                 let (label, args) = (c.label.clone(), c.args.clone());
                 self.apply(ctx, Action::Run(label, args), t);
             }
+            Action::OpenSettings => self.settings_win.open(),
+        }
+    }
+
+    /// Log + persist after the settings window changed something.
+    fn settings_changed(&mut self, t: f64) {
+        let s = &self.settings;
+        self.push_log(
+            t,
+            format!(
+                "settings // palette {} :: {} :: {}",
+                s.palette.name(),
+                if s.chamfer { "chamfer" } else { "square" },
+                if s.compact { "compact" } else { "normal" }
+            ),
+            Level::Warn,
+        );
+        if let Err(e) = self.settings.save(APP_ID) {
+            self.push_log(t, format!("settings // save failed: {e}"), Level::Danger);
         }
     }
 
@@ -512,6 +551,9 @@ impl BrewApp {
             }
             if cmd && i.key_pressed(Key::R) {
                 actions.push(Action::Refresh);
+            }
+            if cmd && i.key_pressed(Key::Comma) {
+                actions.push(Action::OpenSettings);
             }
             for (n, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4]
                 .iter()
@@ -610,7 +652,8 @@ impl eframe::App for BrewApp {
                 fps,
                 self.fetch_ms
             ))
-            .lamp(link_text, link_color, false);
+            .lamp(link_text, link_color, false)
+            .settings_button(true);
         if self.brew.fetching() {
             shell = shell.lamp("INVENTORY", pal.warn, true);
         }
@@ -625,7 +668,7 @@ impl eframe::App for BrewApp {
             );
         }
 
-        shell.show(ui, |ui| {
+        let out = shell.show_full(ui, |ui| {
             let c = ui.max_rect();
             let top = c.top() + 10.0;
             let log_rect = Rect::from_min_max(pos2(c.left(), c.bottom() - LOG_H), c.max);
@@ -654,6 +697,9 @@ impl eframe::App for BrewApp {
             self.ui_inspector(ui, right, &mut actions);
             self.ui_log(ui, log_rect);
         });
+        if out.settings_clicked {
+            actions.push(Action::OpenSettings);
+        }
 
         self.ui_dialog(&ctx, &mut actions);
         for a in actions {
@@ -661,6 +707,13 @@ impl eframe::App for BrewApp {
         }
         if self.dirty {
             self.rebuild_rows();
+        }
+        // Settings window (child viewport) last: it pauses this viewport while it draws.
+        if self
+            .settings_win
+            .show(&ctx, &mut self.settings, "FUIDE Brew")
+        {
+            self.settings_changed(t);
         }
     }
 }
@@ -789,7 +842,7 @@ impl BrewApp {
                 ui.painter().text(
                     pos2(fr.left(), fr.center().y),
                     Align2::LEFT_CENTER,
-                    "CMD+R REFRESH  CMD+1..4 VIEWS",
+                    "CMD+R REFRESH  CMD+1..4 VIEWS  CMD+, SETTINGS",
                     mono(ts.small),
                     pal.text_dim,
                 );

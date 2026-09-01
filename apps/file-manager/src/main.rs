@@ -4,6 +4,7 @@ mod app;
 mod fs;
 
 fn main() -> eframe::Result {
+    fuide::devshot::install_trace_logger();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("FUIDE File Manager")
