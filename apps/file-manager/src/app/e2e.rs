@@ -130,6 +130,41 @@ fn cmd_f_focuses_the_filter_typing_narrows_the_list_and_escape_clears_it() {
 }
 
 #[test]
+fn dragging_the_log_divider_resizes_the_log_panel_and_saves_the_height() {
+    let fx = fixture("e2e-splitter");
+    let mut h = harness(&fx.root);
+    let conf: PathBuf = fx.root.join("cfg").join("file-manager.conf");
+    h.state_mut().persist_settings_to(conf.clone());
+    let before = h.state().log_h;
+    assert_eq!(before, LOG_H);
+
+    let grip = h.get_by_label("LOG HEIGHT").rect().center();
+    h.drag_at(grip);
+    h.run_steps(1);
+    for i in 1..=6 {
+        h.hover_at(grip - egui::vec2(0.0, 10.0 * i as f32));
+        h.run_steps(1);
+    }
+    h.drop_at(grip - egui::vec2(0.0, 60.0));
+    h.run_steps(2);
+    assert_eq!(h.state().log_h, before + 60.0);
+    assert_eq!(
+        Settings::load_from(&conf).unwrap().log_height,
+        Some(before + 60.0)
+    );
+
+    // dragging far down stops at the minimum
+    let grip = h.get_by_label("LOG HEIGHT").rect().center();
+    h.drag_at(grip);
+    h.run_steps(1);
+    h.hover_at(grip + egui::vec2(0.0, 500.0));
+    h.run_steps(1);
+    h.drop_at(grip + egui::vec2(0.0, 500.0));
+    h.run_steps(2);
+    assert_eq!(h.state().log_h, LOG_MIN);
+}
+
+#[test]
 fn the_gear_opens_settings_and_a_palette_click_restyles_and_saves() {
     let fx = fixture("e2e-settings");
     let mut h = harness(&fx.root);

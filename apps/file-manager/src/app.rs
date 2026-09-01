@@ -15,7 +15,11 @@ const LEFT_W: f32 = 220.0;
 const RIGHT_W: f32 = 300.0;
 const GAP: f32 = 14.0;
 const TOOLBAR_H: f32 = 32.0;
+/// Default log panel height; the divider above it is draggable (`Settings::log_height`).
 const LOG_H: f32 = 110.0;
+const LOG_MIN: f32 = 60.0;
+/// Space kept for the panels above the log when the divider is dragged up.
+const BODY_MIN: f32 = 300.0;
 const STORAGE_H: f32 = 152.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -111,6 +115,8 @@ pub struct Explorer {
     settings_win: SettingsWindow,
     /// Where settings are saved; `None` = not persisted (tests, or no config dir).
     settings_path: Option<PathBuf>,
+    /// Current log panel height (draggable divider).
+    log_h: f32,
     scroll_to_selected: bool,
     dialog: Option<OpenDialog>,
     /// Errors waiting for the dialog slot (only one dialog at a time).
@@ -175,6 +181,7 @@ impl Explorer {
             volumes: fs::volumes(),
             last_error: None,
             load_ms: 0.0,
+            log_h: settings.log_height.unwrap_or(LOG_H),
             settings,
             settings_win: SettingsWindow::default(),
             settings_path: None,
@@ -511,6 +518,11 @@ impl Explorer {
             ),
             Level::Warn,
         );
+        self.save_settings(t);
+    }
+
+    /// Persist the settings (silently; errors go to the log).
+    fn save_settings(&mut self, t: f64) {
         if let Some(path) = self.settings_path.clone() {
             if let Err(e) = self.settings.save_to(&path) {
                 self.push_log(t, format!("settings // save failed: {e}"), Level::Danger);
@@ -665,10 +677,13 @@ impl eframe::App for Explorer {
             shell = shell.lamp("FS WRITE", pal.warn, true);
         }
 
+        let mut log_resized = false;
         let out = shell.show_full(ui, |ui| {
             let c = ui.max_rect();
             let top = c.top() + 10.0; // room for title chips above the first panels
-            let log_rect = Rect::from_min_max(pos2(c.left(), c.bottom() - LOG_H), c.max);
+            let log_max = c.height() - BODY_MIN;
+            self.log_h = self.log_h.clamp(LOG_MIN, log_max.max(LOG_MIN));
+            let log_rect = Rect::from_min_max(pos2(c.left(), c.bottom() - self.log_h), c.max);
             let body_bottom = log_rect.top() - GAP - 8.0;
 
             let left =
@@ -696,9 +711,26 @@ impl eframe::App for Explorer {
             self.ui_listing(ui, listing, &mut actions);
             self.ui_inspector(ui, right, &mut actions);
             self.ui_log(ui, log_rect, t);
+            // draggable divider in the gap above the log panel
+            let strip =
+                Rect::from_min_max(pos2(c.left(), body_bottom), pos2(c.right(), log_rect.top()));
+            let resp = widgets::h_splitter(
+                ui,
+                strip,
+                "log",
+                &mut self.log_h,
+                LOG_MIN,
+                log_max,
+                "LOG HEIGHT",
+            );
+            log_resized = resp.drag_stopped();
         });
         if out.settings_clicked {
             actions.push(Action::OpenSettings);
+        }
+        if log_resized {
+            self.settings.log_height = Some(self.log_h.round());
+            self.save_settings(t);
         }
 
         self.ui_dialog(&ctx, &mut actions);
