@@ -109,6 +109,8 @@ pub struct Explorer {
     load_ms: f32,
     settings: Settings,
     settings_win: SettingsWindow,
+    /// Where settings are saved; `None` = not persisted (tests, or no config dir).
+    settings_path: Option<PathBuf>,
     scroll_to_selected: bool,
     dialog: Option<OpenDialog>,
     /// Errors waiting for the dialog slot (only one dialog at a time).
@@ -125,21 +127,34 @@ pub struct Explorer {
 }
 
 impl Explorer {
+    /// Production entry point: settings from disk, start directory from the command line
+    /// (`fuide-file-manager [DIR]`, default `$HOME`).
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = Settings::load(APP_ID).unwrap_or_else(|| Settings::new(PaletteKind::Cyan));
-        theme::install(
-            &cc.egui_ctx,
-            settings.palette.palette(),
-            theme::macos_cjk_fallback(),
-        );
-        settings.apply(&cc.egui_ctx);
-        // `fuide-file-manager [DIR]` starts in DIR; default is $HOME.
         let home = std::env::args()
             .nth(1)
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"));
+        let mut app = Self::with_context(&cc.egui_ctx, home, settings);
+        if let Some(path) = Settings::path(APP_ID) {
+            app.persist_settings_to(path);
+        }
+        app
+    }
+
+    /// Save settings changes to `path` from now on (apps built with [`Self::with_context`] do
+    /// not persist by default).
+    pub fn persist_settings_to(&mut self, path: PathBuf) {
+        self.settings_path = Some(path);
+    }
+
+    /// Build the app on any `egui::Context` (tests use a bare `Context::default()` or an
+    /// `egui_kittest` harness) with explicit settings and start directory.
+    pub fn with_context(ctx: &egui::Context, home: PathBuf, settings: Settings) -> Self {
+        theme::install(ctx, settings.palette.palette(), theme::macos_cjk_fallback());
+        settings.apply(ctx);
         let mut app = Self {
             loader: Loader::new(),
             cwd: home.clone(),
@@ -162,6 +177,7 @@ impl Explorer {
             load_ms: 0.0,
             settings,
             settings_win: SettingsWindow::default(),
+            settings_path: None,
             scroll_to_selected: false,
             dialog: None,
             error_queue: std::collections::VecDeque::new(),
@@ -182,7 +198,7 @@ impl Explorer {
         if let Ok(text) = std::env::var("FUIDE_DEV_LOG") {
             app.push_log(0.0, text, Level::Danger);
         }
-        app.load(&cc.egui_ctx, home);
+        app.load(ctx, home);
         app
     }
 
@@ -495,8 +511,10 @@ impl Explorer {
             ),
             Level::Warn,
         );
-        if let Err(e) = self.settings.save(APP_ID) {
-            self.push_log(t, format!("settings // save failed: {e}"), Level::Danger);
+        if let Some(path) = self.settings_path.clone() {
+            if let Err(e) = self.settings.save_to(&path) {
+                self.push_log(t, format!("settings // save failed: {e}"), Level::Danger);
+            }
         }
     }
 
@@ -1582,3 +1600,6 @@ fn crumb(ui: &mut Ui, label: &str, last: bool, pal: &Palette) -> egui::Response 
         .galley(rect.min + vec2(4.0, 3.0), galley, color);
     resp
 }
+
+#[cfg(test)]
+mod tests;

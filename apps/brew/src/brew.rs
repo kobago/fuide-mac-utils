@@ -137,9 +137,13 @@ pub struct Brew {
     fetching: bool,
 }
 
-/// Locate `brew`. Apps launched from Spotlight / Finder get a minimal `PATH`
-/// (`/usr/bin:/bin:/usr/sbin:/sbin`), so the well-known prefixes are tried first.
+/// Locate `brew`. `FUIDE_BREW_BIN` overrides it (tests point it at `fixtures/fake-brew.sh`).
+/// Apps launched from Spotlight / Finder get a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
+/// so the well-known prefixes are tried first.
 pub fn brew_executable() -> PathBuf {
+    if let Some(p) = std::env::var_os("FUIDE_BREW_BIN") {
+        return PathBuf::from(p);
+    }
     for p in [
         "/opt/homebrew/bin/brew",
         "/usr/local/bin/brew",
@@ -199,6 +203,12 @@ impl Brew {
 
     pub fn running(&self) -> Option<&str> {
         self.running.as_deref()
+    }
+
+    /// Feed a message as if a worker had produced it (unit tests drive the app without brew).
+    #[cfg(test)]
+    pub fn inject(&self, msg: Msg) {
+        let _ = self.tx.send(msg);
     }
 
     pub fn fetching(&self) -> bool {

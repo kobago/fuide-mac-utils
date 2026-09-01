@@ -1,6 +1,7 @@
 //! FUIDE Brew — Homebrew front-end with a tactical-console look.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use egui::{pos2, vec2, Align2, Key, Rect, RichText, Sense, Ui};
 use fuide::table::{self, Cell, Column, TableState, Width};
@@ -128,17 +129,34 @@ pub struct BrewApp {
     dev_close_frame: Option<u32>,
     settings: Settings,
     settings_win: SettingsWindow,
+    /// Where settings are saved; `None` = not persisted (tests, or no config dir).
+    settings_path: Option<PathBuf>,
 }
 
 impl BrewApp {
+    /// Production entry point: settings from disk, then start reading the brew inventory.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = Settings::load(APP_ID).unwrap_or_else(|| Settings::new(PaletteKind::Amber));
-        theme::install(
-            &cc.egui_ctx,
-            settings.palette.palette(),
-            theme::macos_cjk_fallback(),
-        );
-        settings.apply(&cc.egui_ctx);
+        let mut app = Self::with_context(&cc.egui_ctx, settings);
+        if let Some(path) = Settings::path(APP_ID) {
+            app.persist_settings_to(path);
+        }
+        app.brew.fetch_inventory(cc.egui_ctx.clone());
+        app.brew.fetch_system(cc.egui_ctx.clone());
+        app
+    }
+
+    /// Save settings changes to `path` from now on (apps built with [`Self::with_context`] do
+    /// not persist by default).
+    pub fn persist_settings_to(&mut self, path: PathBuf) {
+        self.settings_path = Some(path);
+    }
+
+    /// Build the app on any `egui::Context` without touching `brew` (tests drive it with
+    /// canned data or a fake `brew` executable).
+    pub fn with_context(ctx: &egui::Context, settings: Settings) -> Self {
+        theme::install(ctx, settings.palette.palette(), theme::macos_cjk_fallback());
+        settings.apply(ctx);
         let mut app = Self {
             brew: Brew::new(),
             packages: Vec::new(),
@@ -166,6 +184,7 @@ impl BrewApp {
                 .and_then(|v| v.parse().ok()),
             settings,
             settings_win: SettingsWindow::default(),
+            settings_path: None,
         };
         app.push_log(0.0, "brew console online :: reading inventory", Level::Ok);
         // Dev aid: `FUIDE_DEV_SETTINGS=1` opens the settings window at start (screenshots).
@@ -175,8 +194,6 @@ impl BrewApp {
         if let Ok(text) = std::env::var("FUIDE_DEV_LOG") {
             app.push_log(0.0, text, Level::Danger);
         }
-        app.brew.fetch_inventory(cc.egui_ctx.clone());
-        app.brew.fetch_system(cc.egui_ctx.clone());
         app
     }
 
@@ -514,8 +531,10 @@ impl BrewApp {
             ),
             Level::Warn,
         );
-        if let Err(e) = self.settings.save(APP_ID) {
-            self.push_log(t, format!("settings // save failed: {e}"), Level::Danger);
+        if let Some(path) = self.settings_path.clone() {
+            if let Err(e) = self.settings.save_to(&path) {
+                self.push_log(t, format!("settings // save failed: {e}"), Level::Danger);
+            }
         }
     }
 
@@ -1366,3 +1385,6 @@ impl BrewApp {
             });
     }
 }
+
+#[cfg(test)]
+mod tests;

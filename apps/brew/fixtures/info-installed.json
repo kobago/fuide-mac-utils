@@ -1,0 +1,24 @@
+{
+  "formulae": [
+    {"name": "ripgrep", "desc": "Search tool like grep and The Silver Searcher", "homepage": "https://github.com/BurntSushi/ripgrep", "tap": "homebrew/core", "license": "MIT",
+     "outdated": true, "pinned": false,
+     "installed": [{"version": "14.0.0", "installed_on_request": true, "installed_as_dependency": false, "time": 1700000000}],
+     "versions": {"stable": "14.1.0"}, "dependencies": ["pcre2"]},
+    {"name": "jq", "desc": "Lightweight and flexible command-line JSON processor", "homepage": "https://jqlang.github.io/jq/", "tap": "homebrew/core", "license": "MIT",
+     "outdated": false, "pinned": false,
+     "installed": [{"version": "1.7.1", "installed_on_request": true, "installed_as_dependency": false, "time": 1700000100}],
+     "versions": {"stable": "1.7.1"}, "dependencies": ["oniguruma"]},
+    {"name": "cmake", "desc": "Cross-platform make", "homepage": "https://www.cmake.org/", "tap": "homebrew/core", "license": "BSD-3-Clause",
+     "outdated": true, "pinned": true,
+     "installed": [{"version": "3.30.0", "installed_on_request": true, "installed_as_dependency": false, "time": 1700000200}],
+     "versions": {"stable": "3.31.0"}, "dependencies": []},
+    {"name": "pcre2", "desc": "Perl compatible regular expressions library with a new API", "homepage": "https://www.pcre.org/", "tap": "homebrew/core", "license": "BSD-3-Clause",
+     "outdated": false, "pinned": false,
+     "installed": [{"version": "10.44", "installed_on_request": false, "installed_as_dependency": true, "time": 1700000300}],
+     "versions": {"stable": "10.44"}, "dependencies": []}
+  ],
+  "casks": [
+    {"token": "iterm2", "name": ["iTerm2"], "desc": "Terminal emulator as alternative to Apple's Terminal app", "homepage": "https://iterm2.com/", "tap": "homebrew/cask",
+     "version": "3.5.0", "installed": "3.4.0", "outdated": true, "auto_updates": true}
+  ]
+}
