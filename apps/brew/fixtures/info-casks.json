@@ -1,0 +1,18 @@
+{
+ "formulae": [],
+ "casks": [
+  {
+   "token": "iterm2",
+   "name": [
+    "iTerm2"
+   ],
+   "desc": "Terminal emulator as alternative to Apple's Terminal app",
+   "homepage": "https://iterm2.com/",
+   "tap": "homebrew/cask",
+   "version": "3.5.0",
+   "installed": "3.4.0",
+   "outdated": true,
+   "auto_updates": true
+  }
+ ]
+}

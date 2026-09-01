@@ -19,7 +19,7 @@ const TOOLBAR_H: f32 = 32.0;
 const LOG_H: f32 = 150.0;
 const SYSTEM_H: f32 = 236.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
     Installed,
     Outdated,
@@ -927,6 +927,10 @@ impl BrewApp {
                     &mut self.search_query,
                     "search formulae and casks",
                 );
+                // Cmd+F in the Search view goes to the search box, not the row filter
+                if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
+                    resp.request_focus();
+                }
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     actions.push(Action::Search);
                 }
@@ -960,7 +964,8 @@ impl BrewApp {
             }
         }
 
-        let want_focus = ui.input(|i| i.modifiers.command && i.key_pressed(Key::F));
+        let want_focus =
+            self.view != View::Search && ui.input(|i| i.modifiers.command && i.key_pressed(Key::F));
         let mut right = ui.new_child(
             egui::UiBuilder::new()
                 .id_salt("toolbar-right")
@@ -976,7 +981,8 @@ impl BrewApp {
             if want_focus {
                 resp.request_focus();
             }
-            if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+            // egui drops focus on Escape before widgets run: see `lost_focus` (file manager)
+            if (resp.has_focus() || resp.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape)) {
                 self.filter.clear();
                 self.dirty = true;
                 resp.surrender_focus();
@@ -1386,5 +1392,7 @@ impl BrewApp {
     }
 }
 
+#[cfg(test)]
+mod e2e;
 #[cfg(test)]
 mod tests;

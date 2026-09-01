@@ -919,7 +919,9 @@ impl Explorer {
             if want_focus {
                 resp.request_focus();
             }
-            if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+            // egui drops focus on Escape before widgets run, so the field reports `lost_focus`
+            // (not `has_focus`) in the frame the key arrives
+            if (resp.has_focus() || resp.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape)) {
                 self.filter.clear();
                 self.dirty = true;
                 resp.surrender_focus();
@@ -1047,8 +1049,17 @@ impl Explorer {
                             if scroll_to == Some(row) {
                                 resp.scroll_to_me(None);
                             }
-                            let p = ui.painter().with_clip_rect(r.intersect(ui.clip_rect()));
                             let is_sel = selected == Some(idx);
+                            // rows are addressable by file name (UI tests, assistive tech)
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    true,
+                                    is_sel,
+                                    e.name.clone(),
+                                )
+                            });
+                            let p = ui.painter().with_clip_rect(r.intersect(ui.clip_rect()));
                             if is_sel {
                                 p.rect_filled(
                                     r,
@@ -1601,5 +1612,7 @@ fn crumb(ui: &mut Ui, label: &str, last: bool, pal: &Palette) -> egui::Response 
     resp
 }
 
+#[cfg(test)]
+mod e2e;
 #[cfg(test)]
 mod tests;

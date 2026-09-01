@@ -18,6 +18,10 @@ open = "5"
 libc = "0.2"
 trash = "5"
 
+[dev-dependencies]
+# end-to-end tests: the whole eframe app driven through the accessibility tree (`src/app/e2e.rs`)
+egui_kittest = { version = "0.36.1", features = ["eframe"] }
+
 # `cargo bundle --release --format dmg -p fuide-file-manager` (see scripts/release.sh)
 [package.metadata.bundle]
 name = "FUIDE File Manager"

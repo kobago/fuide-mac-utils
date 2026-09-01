@@ -11,8 +11,8 @@ use fuide::palette;
 
 use super::*;
 
-struct Fixture {
-    root: PathBuf,
+pub(super) struct Fixture {
+    pub(super) root: PathBuf,
 }
 
 impl Drop for Fixture {
@@ -22,7 +22,7 @@ impl Drop for Fixture {
 }
 
 /// `docs/inner.txt`, `Music/`, `b.txt`, `A.md`, `.hidden`
-fn fixture(name: &str) -> Fixture {
+pub(super) fn fixture(name: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!(
         "fuide-file-manager-app-{name}-{}",
         std::process::id()

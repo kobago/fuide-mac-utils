@@ -11,7 +11,15 @@ case "$1" in
   --version) echo "Homebrew 4.9.9" ;;
   --prefix) echo "/tmp/fuide-fake-brew-prefix" ;;
   --repository) echo "/tmp/fuide-fake-brew-prefix" ;;
-  info) cat "$here/info-installed.json" ;;
+  info)
+    # `info --json=v2 --installed` = everything; `info --json=v2 --formula|--cask <names>`
+    # (the search detail pass) = only that kind, so hits are not duplicated
+    case "$*" in
+      *--cask*) cat "$here/info-casks.json" ;;
+      *--formula*) cat "$here/info-formulae.json" ;;
+      *) cat "$here/info-installed.json" ;;
+    esac
+    ;;
   search)
     # `brew search --formula|--cask <query>`: a couple of hits for anything
     case "$2" in

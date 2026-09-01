@@ -14,7 +14,7 @@ use crate::brew::{parse_info_json, Msg};
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
 
 /// Route every `brew` call to the fake script (process-wide; all tests use the same value).
-fn use_fake_brew() {
+pub(super) fn use_fake_brew() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let script = Path::new(FIXTURES).join("fake-brew.sh");

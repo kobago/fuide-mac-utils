@@ -17,6 +17,10 @@ chrono = "0.4"
 open = "5"
 serde_json = "1"
 
+[dev-dependencies]
+# end-to-end tests: the whole eframe app driven through the accessibility tree (`src/app/e2e.rs`)
+egui_kittest = { version = "0.36.1", features = ["eframe"] }
+
 # `cargo bundle --release --format dmg -p fuide-brew` (see scripts/release.sh)
 [package.metadata.bundle]
 name = "FUIDE Brew"
