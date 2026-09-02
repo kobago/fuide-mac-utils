@@ -51,6 +51,23 @@ fn names(h: &Harness<'static, Explorer>) -> Vec<String> {
     s.view.iter().map(|&i| s.entries[i].name.clone()).collect()
 }
 
+/// Primary click at a position while holding `modifiers` (kittest's node helper cannot be
+/// used here because selected row names also exist as inspector labels).
+fn click_modifiers(h: &mut Harness<'static, Explorer>, pos: egui::Pos2, modifiers: Modifiers) {
+    h.event(egui::Event::PointerMoved(pos));
+    h.event(egui::Event::ModifiersChanged(modifiers));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        });
+    }
+    h.event(egui::Event::ModifiersChanged(Modifiers::default()));
+    h.run_steps(3);
+}
+
 #[test]
 fn rows_select_by_click_and_the_keyboard_walks_the_tree() {
     let fx = fixture("e2e-nav");
@@ -88,10 +105,7 @@ fn rows_select_by_click_and_the_keyboard_walks_the_tree() {
     h.run_steps(2);
     h.key_press(Key::ArrowDown);
     h.run_steps(2);
-    let sel = h
-        .state()
-        .selected
-        .map(|i| h.state().entries[i].name.clone());
+    let sel = h.state().lead.map(|i| h.state().entries[i].name.clone());
     assert_eq!(sel.as_deref(), Some("Music"));
     assert_eq!(
         h.get_by_role_and_label(Role::Button, "Music")
@@ -99,6 +113,90 @@ fn rows_select_by_click_and_the_keyboard_walks_the_tree() {
             .toggled(),
         Some(Toggled::True)
     );
+}
+
+#[test]
+fn cmd_and_shift_clicks_build_a_multi_selection_and_cmd_a_takes_all() {
+    let fx = fixture("e2e-multi");
+    let mut h = harness(&fx.root);
+    // selection is an index set; sort the names for stable comparisons
+    let sel_names = |h: &Harness<'static, Explorer>| -> Vec<String> {
+        let s = h.state();
+        let mut v: Vec<String> = s
+            .selected
+            .iter()
+            .map(|&i| s.entries[i].name.clone())
+            .collect();
+        v.sort();
+        v
+    };
+
+    // rows are queried by role: selected names also appear in the inspector as labels
+    let row = |h: &Harness<'static, Explorer>, name: &str| {
+        h.get_by_role_and_label(Role::Button, name).rect().center()
+    };
+
+    h.get_by_label("A.md").click();
+    h.run_steps(2);
+    let pos = row(&h, "b.txt");
+    click_modifiers(&mut h, pos, Modifiers::COMMAND);
+    assert_eq!(sel_names(&h), ["A.md", "b.txt"]);
+    assert_eq!(
+        h.get_by_role_and_label(Role::Button, "A.md")
+            .accesskit_node()
+            .toggled(),
+        Some(Toggled::True),
+        "both rows report as selected"
+    );
+
+    // Cmd+click again removes the row from the selection
+    let pos = row(&h, "b.txt");
+    click_modifiers(&mut h, pos, Modifiers::COMMAND);
+    assert_eq!(sel_names(&h), ["A.md"]);
+
+    // Shift+click selects the anchor..target range in visible order (docs .. A.md)
+    let pos = row(&h, "A.md");
+    click_modifiers(&mut h, pos, Modifiers::default());
+    let pos = row(&h, "docs");
+    click_modifiers(&mut h, pos, Modifiers::SHIFT);
+    assert_eq!(sel_names(&h), ["A.md", "Music", "docs"]);
+
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(2);
+    assert_eq!(h.state().selected.len(), 4);
+
+    // with several rows selected, the inspector switches to the aggregate view
+    h.get_by_label("4 ITEMS SELECTED");
+}
+
+#[test]
+fn dragging_a_row_onto_a_directory_moves_the_file_there() {
+    let fx = fixture("e2e-dnd");
+    let mut h = harness(&fx.root);
+    let from = h.get_by_label("A.md").rect().center();
+    let to = h.get_by_label("docs").rect().center();
+
+    h.drag_at(from);
+    h.run_steps(1);
+    // several small moves so egui's drag threshold trips before the drop
+    for i in 1..=6 {
+        let f = i as f32 / 6.0;
+        h.hover_at(from.lerp(to, f));
+        h.run_steps(1);
+    }
+    assert!(h.state().drag.is_some(), "row drag is active");
+    h.drop_at(to);
+    settle(&mut h);
+
+    assert!(h.state().drag.is_none());
+    assert!(fx.root.join("docs/A.md").exists(), "file moved into docs");
+    assert!(!fx.root.join("A.md").exists());
+    assert_eq!(names(&h), ["docs", "Music", "b.txt"]);
+    let s = h.state();
+    assert!(s
+        .log
+        .iter()
+        .any(|e| e.text.contains("move // A.md -> docs :: done")));
 }
 
 #[test]
@@ -121,7 +219,7 @@ fn cmd_f_focuses_the_filter_typing_narrows_the_list_and_escape_clears_it() {
     // the text field owns the keyboard: arrows must not move the selection
     h.key_press(Key::ArrowDown);
     h.run_steps(2);
-    assert_eq!(h.state().selected, None);
+    assert!(h.state().selected.is_empty());
 
     h.key_press(Key::Escape);
     settle(&mut h);

@@ -112,11 +112,100 @@ fn hidden_toggle_and_filter_rebuild_the_view_and_drop_a_filtered_selection() {
     app.rebuild_view();
     assert_eq!(names(&app), ["docs", "Music", ".hidden", "A.md", "b.txt"]);
 
-    app.selected = Some(idx_of(&app, "b.txt"));
+    app.select_one(Some(idx_of(&app, "b.txt")));
     app.filter = "MD".into(); // case-insensitive
     app.rebuild_view();
     assert_eq!(names(&app), ["A.md"]);
-    assert_eq!(app.selected, None, "selection outside the view is cleared");
+    assert!(
+        app.selected.is_empty(),
+        "selection outside the view is cleared"
+    );
+}
+
+#[test]
+fn toggle_range_and_select_all_follow_finder_conventions() {
+    let fx = fixture("multi");
+    let (ctx, mut app) = app(&fx.root);
+    // view order: docs, Music, A.md, b.txt
+    let (docs, music, amd, btxt) = (
+        idx_of(&app, "docs"),
+        idx_of(&app, "Music"),
+        idx_of(&app, "A.md"),
+        idx_of(&app, "b.txt"),
+    );
+
+    app.apply(&ctx, Action::Select(Some(amd)), 0.0);
+    app.apply(&ctx, Action::SelectToggle(btxt), 0.0);
+    assert_eq!(app.selected, BTreeSet::from([amd, btxt]));
+    assert_eq!(app.single_selected(), None);
+
+    // Cmd+click again removes the entry
+    app.apply(&ctx, Action::SelectToggle(amd), 0.0);
+    assert_eq!(app.selected, BTreeSet::from([btxt]));
+
+    // Shift replaces the selection with the anchor..target range in visible order
+    app.apply(&ctx, Action::Select(Some(amd)), 0.0);
+    app.apply(&ctx, Action::SelectRange(docs), 0.0);
+    assert_eq!(app.selected, BTreeSet::from([docs, music, amd]));
+
+    app.apply(&ctx, Action::Select(Some(music)), 0.0);
+    app.apply(&ctx, Action::SelectAll, 0.0);
+    assert_eq!(app.selected.len(), 4);
+
+    // arrows walk from the lead
+    assert_eq!(app.lead, Some(music));
+}
+
+#[test]
+fn move_to_relocates_selected_paths_and_skips_noops() {
+    let fx = fixture("move-to");
+    let (ctx, mut app) = app(&fx.root);
+    let docs = fx.root.join("docs");
+    app.apply(
+        &ctx,
+        Action::MoveTo {
+            dest: docs.clone(),
+            paths: vec![
+                fx.root.join("A.md"),
+                fx.root.join("b.txt"),
+                docs.join("inner.txt"), // already there: filtered out
+            ],
+        },
+        0.0,
+    );
+    settle(&ctx, &mut app);
+    assert!(docs.join("A.md").exists() && docs.join("b.txt").exists());
+    assert!(!fx.root.join("A.md").exists());
+    assert_eq!(names(&app), ["docs", "Music"]);
+    assert!(log_has(&app, "move // 2 items -> docs :: done"));
+
+    // moving a directory into itself is filtered out before the worker runs
+    app.apply(
+        &ctx,
+        Action::MoveTo {
+            dest: docs.clone(),
+            paths: vec![docs.clone()],
+        },
+        0.0,
+    );
+    settle(&ctx, &mut app);
+    assert!(docs.exists());
+    assert!(!log_has(&app, "move // docs"));
+}
+
+#[test]
+fn confirm_delete_removes_every_selected_entry() {
+    let fx = fixture("multi-delete");
+    let (ctx, mut app) = app(&fx.root);
+    let (amd, btxt) = (idx_of(&app, "A.md"), idx_of(&app, "b.txt"));
+    app.apply(&ctx, Action::Select(Some(amd)), 0.0);
+    app.apply(&ctx, Action::SelectToggle(btxt), 0.0);
+    app.apply(&ctx, Action::OpenDelete(true), 0.0);
+    app.apply(&ctx, Action::ConfirmDelete, 0.0);
+    settle(&ctx, &mut app);
+    assert_eq!(names(&app), ["docs", "Music"]);
+    assert!(!fx.root.join("A.md").exists() && !fx.root.join("b.txt").exists());
+    assert!(log_has(&app, "delete // 2 items :: done"));
 }
 
 #[test]
@@ -206,7 +295,7 @@ fn rename_dialog_rejects_conflicts_then_renames_and_reselects_the_entry() {
     assert!(app.dialog.as_ref().unwrap().closing);
     settle(&ctx, &mut app);
     assert_eq!(names(&app), ["docs", "Music", "A.md", "c.txt"]);
-    assert_eq!(app.selected, Some(idx_of(&app, "c.txt")));
+    assert_eq!(app.single_selected(), Some(idx_of(&app, "c.txt")));
     assert!(fx.root.join("c.txt").exists() && !fx.root.join("b.txt").exists());
     assert!(log_has(&app, "rename // b.txt -> c.txt"));
 }
@@ -216,7 +305,8 @@ fn permanent_delete_removes_the_file_and_reloads() {
     let fx = fixture("delete");
     let (ctx, mut app) = app(&fx.root);
     let i = idx_of(&app, "A.md");
-    app.apply(&ctx, Action::OpenDelete(i, true), 0.0);
+    app.apply(&ctx, Action::Select(Some(i)), 0.0);
+    app.apply(&ctx, Action::OpenDelete(true), 0.0);
     app.apply(&ctx, Action::ConfirmDelete, 0.0);
     assert!(app.dialog.as_ref().unwrap().closing);
     app.apply(&ctx, Action::ConfirmDelete, 0.0); // double-confirm while closing is ignored

@@ -1,5 +1,6 @@
 //! FUIDE File Manager — Finder-like browser with a tactical-console look.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use egui::{pos2, vec2, Align2, Key, Rect, RichText, ScrollArea, Sense, Stroke, Ui};
@@ -61,18 +62,25 @@ enum DialogState {
         focus: bool,
     },
     Delete {
-        idx: usize,
+        indices: Vec<usize>,
         permanent: bool,
     },
     /// Big `ERROR` card; details live in the event log.
-    Error {
-        line: String,
-    },
+    Error { line: String },
+}
+
+/// A drag of listing rows, before it is either dropped on an in-app directory or
+/// handed to the OS (`drag::start_drag`) when the pointer leaves the window.
+struct DragState {
+    paths: Vec<PathBuf>,
+    /// Ghost caption: the file name, or `N ITEMS`.
+    label: String,
 }
 
 enum Action {
     OpenRename(usize),
-    OpenDelete(usize, bool),
+    /// Confirmation dialog for the current selection (`true` = permanent).
+    OpenDelete(bool),
     ConfirmRename,
     ConfirmDelete,
     CloseDialog,
@@ -81,13 +89,23 @@ enum Action {
     Forward,
     Up,
     Select(Option<usize>),
+    SelectToggle(usize),
+    SelectRange(usize),
+    SelectAll,
     Activate(usize),
     Open(PathBuf),
     Reveal(PathBuf),
-    CopyPath(PathBuf),
+    CopyPaths(Vec<PathBuf>),
     Sort(SortKey),
     Palette(PaletteKind),
     OpenSettings,
+    /// Start dragging the row at this entry index (plus the rest of the selection).
+    BeginDrag(usize),
+    /// Move `paths` into the directory `dest` (drop of a drag, or an external drop).
+    MoveTo {
+        dest: PathBuf,
+        paths: Vec<PathBuf>,
+    },
 }
 
 /// Settings file name (`Settings::path`).
@@ -100,7 +118,19 @@ pub struct Explorer {
     entries: Vec<Entry>,
     view: Vec<usize>,
     dirty: bool,
-    selected: Option<usize>,
+    /// Multi-selection: indices into `entries`.
+    selected: BTreeSet<usize>,
+    /// Last row acted on (keyboard walking, inspector focus).
+    lead: Option<usize>,
+    /// Fixed end of a Shift range (set by plain / Cmd clicks).
+    anchor: Option<usize>,
+    /// An in-app drag of listing rows (`Action::BeginDrag`).
+    drag: Option<DragState>,
+    /// Results of OS drag-out sessions (`drag::start_drag` callback, any thread).
+    drag_out: (
+        std::sync::mpsc::Sender<drag::DragResult>,
+        std::sync::mpsc::Receiver<drag::DragResult>,
+    ),
     history: Vec<PathBuf>,
     hist_pos: usize,
     sort_key: SortKey,
@@ -128,6 +158,8 @@ pub struct Explorer {
     select_after_load: Option<String>,
     /// Dev aid: `FUIDE_DEV_DIALOG=rename|trash|delete` opens that dialog on the first entry after load.
     dev_dialog: Option<String>,
+    /// Dev aid: `FUIDE_DEV_SELECT=<n>` selects the first n rows after load (screenshots).
+    dev_select: Option<usize>,
     /// Dev aid: `FUIDE_DEV_DIALOG_CLOSE=<frame>` closes the dev dialog at that frame (fade-out shots).
     dev_close_frame: Option<u32>,
     dev_frame: u32,
@@ -172,7 +204,11 @@ impl Explorer {
             entries: Vec::new(),
             view: Vec::new(),
             dirty: true,
-            selected: None,
+            selected: BTreeSet::new(),
+            lead: None,
+            anchor: None,
+            drag: None,
+            drag_out: std::sync::mpsc::channel(),
             history: vec![home.clone()],
             hist_pos: 0,
             sort_key: SortKey::Name,
@@ -195,6 +231,9 @@ impl Explorer {
             ops: OpChannel::new(),
             select_after_load: None,
             dev_dialog: std::env::var("FUIDE_DEV_DIALOG").ok(),
+            dev_select: std::env::var("FUIDE_DEV_SELECT")
+                .ok()
+                .and_then(|v| v.parse().ok()),
             dev_close_frame: std::env::var("FUIDE_DEV_DIALOG_CLOSE")
                 .ok()
                 .and_then(|v| v.parse().ok()),
@@ -260,7 +299,7 @@ impl Explorer {
             if self.sort_desc { "desc" } else { "asc" },
             self.filter
         );
-        match self.selected.and_then(|i| self.entries.get(i)) {
+        match self.single_selected().and_then(|i| self.entries.get(i)) {
             Some(e) => {
                 let _ = writeln!(
                     s,
@@ -271,7 +310,23 @@ impl Explorer {
                     e.size
                 );
             }
-            None => s.push_str("selected: none\n"),
+            None if self.selected.is_empty() => s.push_str("selected: none\n"),
+            None => {
+                let names: Vec<&str> = self
+                    .selected
+                    .iter()
+                    .filter_map(|&i| self.entries.get(i).map(|e| e.name.as_str()))
+                    .collect();
+                let _ = writeln!(
+                    s,
+                    "selected: {} items ({})",
+                    self.selected.len(),
+                    names.join(", ")
+                );
+            }
+        }
+        if let Some(d) = &self.drag {
+            let _ = writeln!(s, "dragging: {} (drop on a directory to move)", d.label);
         }
         if self.pending.is_some() {
             s.push_str("loading: directory read in progress\n");
@@ -300,9 +355,13 @@ impl Explorer {
                 );
             }
             Some(OpenDialog {
-                state: DialogState::Delete { idx, permanent },
+                state: DialogState::Delete { indices, permanent },
                 ..
             }) => {
+                let names: Vec<&str> = indices
+                    .iter()
+                    .filter_map(|&i| self.entries.get(i).map(|e| e.name.as_str()))
+                    .collect();
                 let _ = writeln!(
                     s,
                     "dialog: {} :: {} :: buttons CANCEL / {}",
@@ -311,10 +370,7 @@ impl Explorer {
                     } else {
                         "MOVE TO TRASH"
                     },
-                    self.entries
-                        .get(*idx)
-                        .map(|e| e.name.as_str())
-                        .unwrap_or("?"),
+                    names.join(", "),
                     if *permanent {
                         "DELETE PERMANENTLY"
                     } else {
@@ -361,11 +417,68 @@ impl Explorer {
         self.error_queue.push_back(line);
     }
 
+    // ------------------------------------------------------------- selection
+
+    /// Replace the selection with one entry (or clear it).
+    fn select_one(&mut self, idx: Option<usize>) {
+        self.selected = idx.into_iter().collect();
+        self.lead = idx;
+        self.anchor = idx;
+    }
+
+    /// Cmd+click: toggle membership; the toggled row becomes lead and anchor.
+    fn select_toggle(&mut self, idx: usize) {
+        if !self.selected.remove(&idx) {
+            self.selected.insert(idx);
+        }
+        self.lead = Some(idx);
+        self.anchor = Some(idx);
+    }
+
+    /// Shift+click / Shift+arrows: select the visible range between the anchor and `idx`.
+    fn select_range(&mut self, idx: usize) {
+        let anchor = self.anchor.or(self.lead).unwrap_or(idx);
+        let pos_of = |e: usize| self.view.iter().position(|&v| v == e);
+        let (Some(a), Some(b)) = (pos_of(anchor), pos_of(idx)) else {
+            self.select_one(Some(idx));
+            return;
+        };
+        let (lo, hi) = (a.min(b), a.max(b));
+        self.selected = self.view[lo..=hi].iter().copied().collect();
+        self.lead = Some(idx);
+        self.anchor = Some(anchor);
+    }
+
+    fn select_all(&mut self) {
+        self.selected = self.view.iter().copied().collect();
+        if self.lead.is_none() {
+            self.lead = self.view.first().copied();
+        }
+    }
+
+    /// The selected entry, when exactly one is selected (rename, single-item inspector).
+    fn single_selected(&self) -> Option<usize> {
+        match self.selected.len() {
+            1 => self.selected.first().copied(),
+            _ => None,
+        }
+    }
+
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selected
+            .iter()
+            .filter_map(|&i| self.entries.get(i).map(|e| e.path.clone()))
+            .collect()
+    }
+
+    // ------------------------------------------------------------------ fs
+
     fn load(&mut self, ctx: &egui::Context, path: PathBuf) {
         self.cwd = path.clone();
         self.pending = Some(self.loader.request(path.clone(), ctx.clone()));
         self.disk = fs::disk_info(&path);
-        self.selected = None;
+        self.select_one(None);
+        self.drag = None;
         self.filter.clear();
     }
 
@@ -414,10 +527,13 @@ impl Explorer {
             }
         });
         self.view = idx;
-        if let Some(s) = self.selected {
-            if !self.view.contains(&s) {
-                self.selected = None;
-            }
+        let visible: BTreeSet<usize> = self.view.iter().copied().collect();
+        self.selected.retain(|i| visible.contains(i));
+        if self.lead.is_some_and(|l| !visible.contains(&l)) {
+            self.lead = None;
+        }
+        if self.anchor.is_some_and(|a| !visible.contains(&a)) {
+            self.anchor = None;
         }
         self.dirty = false;
     }
@@ -457,7 +573,8 @@ impl Explorer {
                     self.entries = entries;
                     self.last_error = None;
                     if let Some(name) = self.select_after_load.take() {
-                        self.selected = self.entries.iter().position(|e| e.name == name);
+                        let idx = self.entries.iter().position(|e| e.name == name);
+                        self.select_one(idx);
                         self.scroll_to_selected = true;
                     }
                 }
@@ -491,10 +608,16 @@ impl Explorer {
                     });
                 }
             }
-            Action::OpenDelete(idx, permanent) => {
-                if idx < self.entries.len() {
+            Action::OpenDelete(permanent) => {
+                let indices: Vec<usize> = self
+                    .selected
+                    .iter()
+                    .copied()
+                    .filter(|&i| i < self.entries.len())
+                    .collect();
+                if !indices.is_empty() {
                     self.dialog = Some(OpenDialog {
-                        state: DialogState::Delete { idx, permanent },
+                        state: DialogState::Delete { indices, permanent },
                         closing: false,
                     });
                 }
@@ -538,7 +661,7 @@ impl Explorer {
             }
             Action::ConfirmDelete => {
                 let Some(OpenDialog {
-                    state: DialogState::Delete { idx, permanent },
+                    state: DialogState::Delete { indices, permanent },
                     closing,
                 }) = &mut self.dialog
                 else {
@@ -547,24 +670,39 @@ impl Explorer {
                 if *closing {
                     return;
                 }
-                let (idx, permanent) = (*idx, *permanent);
+                let permanent = *permanent;
+                let items: Vec<(String, PathBuf)> = indices
+                    .iter()
+                    .filter_map(|&i| self.entries.get(i))
+                    .map(|e| (e.name.clone(), e.path.clone()))
+                    .collect();
                 *closing = true;
-                let entry = self.entries[idx].clone();
-                let path = entry.path.clone();
-                if permanent {
-                    self.push_log(t, format!("delete // {}", entry.name), Level::Danger);
-                    self.ops.spawn(
-                        format!("delete // {}", entry.name),
-                        ctx.clone(),
-                        move || fs::remove(&path),
-                    );
-                } else {
-                    self.push_log(t, format!("trash // {}", entry.name), Level::Warn);
-                    self.ops
-                        .spawn(format!("trash // {}", entry.name), ctx.clone(), move || {
-                            fs::trash(&path)
-                        });
-                }
+                let verb = if permanent { "delete" } else { "trash" };
+                let what = match &items[..] {
+                    [(name, _)] => name.clone(),
+                    _ => format!("{} items", items.len()),
+                };
+                let label = format!("{verb} // {what}");
+                self.push_log(
+                    t,
+                    &label,
+                    if permanent {
+                        Level::Danger
+                    } else {
+                        Level::Warn
+                    },
+                );
+                self.ops.spawn(label, ctx.clone(), move || {
+                    for (name, path) in &items {
+                        let r = if permanent {
+                            fs::remove(path)
+                        } else {
+                            fs::trash(path)
+                        };
+                        r.map_err(|e| format!("{name}: {e}"))?;
+                    }
+                    Ok(())
+                });
             }
             Action::Navigate(p) => self.navigate(ctx, p, t),
             Action::Back => {
@@ -589,8 +727,68 @@ impl Explorer {
                 }
             }
             Action::Select(s) => {
-                self.selected = s;
+                self.select_one(s);
                 self.scroll_to_selected = true;
+            }
+            Action::SelectToggle(i) => self.select_toggle(i),
+            Action::SelectRange(i) => {
+                self.select_range(i);
+                self.scroll_to_selected = true;
+            }
+            Action::SelectAll => self.select_all(),
+            Action::BeginDrag(i) => {
+                if !self.selected.contains(&i) {
+                    self.select_one(Some(i));
+                }
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    return;
+                }
+                let label = match self.single_selected().and_then(|i| self.entries.get(i)) {
+                    Some(e) => e.name.clone(),
+                    None => format!("{} ITEMS", paths.len()),
+                };
+                self.drag = Some(DragState { paths, label });
+            }
+            Action::MoveTo { dest, paths } => {
+                // no-ops (dropped where they already live) and cycles are filtered here so
+                // an external drop of a mixed set only moves what actually changes place
+                let paths: Vec<PathBuf> = paths
+                    .into_iter()
+                    .filter(|p| p.parent() != Some(dest.as_path()) && !dest.starts_with(p))
+                    .collect();
+                if paths.is_empty() {
+                    return;
+                }
+                let dest_name = dest
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "/".into());
+                let what = match &paths[..] {
+                    [p] => p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    _ => format!("{} items", paths.len()),
+                };
+                let label = format!("move // {what} -> {dest_name}");
+                self.push_log(t, &label, Level::Warn);
+                // when files land in the visible directory, select the first arrival
+                if dest == self.cwd {
+                    self.select_after_load = paths[0]
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned());
+                }
+                self.ops.spawn(label, ctx.clone(), move || {
+                    for p in &paths {
+                        let name = p
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        fs::move_into(p, &dest).map_err(|e| format!("{name}: {e}"))?;
+                    }
+                    Ok(())
+                });
             }
             Action::Activate(i) => {
                 let e = self.entries[i].clone();
@@ -614,9 +812,19 @@ impl Explorer {
                 self.push_log(t, format!("reveal // {}", p.display()), Level::Info);
                 let _ = std::process::Command::new("open").arg("-R").arg(&p).spawn();
             }
-            Action::CopyPath(p) => {
-                ctx.copy_text(p.display().to_string());
-                self.push_log(t, "path copied to clipboard", Level::Info);
+            Action::CopyPaths(paths) => {
+                let n = paths.len();
+                let text: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                ctx.copy_text(text.join("\n"));
+                self.push_log(
+                    t,
+                    if n == 1 {
+                        "path copied to clipboard".to_string()
+                    } else {
+                        format!("{n} paths copied to clipboard")
+                    },
+                    Level::Info,
+                );
             }
             Action::Sort(k) => {
                 if self.sort_key == k {
@@ -688,31 +896,39 @@ impl Explorer {
             if i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::ArrowUp) {
                 let dir: isize = if i.key_pressed(Key::ArrowDown) { 1 } else { -1 };
                 let pos = self
-                    .selected
+                    .lead
                     .and_then(|s| self.view.iter().position(|&v| v == s));
                 let next = match pos {
                     Some(p) => (p as isize + dir).clamp(0, self.view.len() as isize - 1) as usize,
                     None => 0,
                 };
                 if let Some(&e) = self.view.get(next) {
-                    actions.push(Action::Select(Some(e)));
+                    // Finder: Shift+arrows grow the selection from the anchor
+                    actions.push(if i.modifiers.shift {
+                        Action::SelectRange(e)
+                    } else {
+                        Action::Select(Some(e))
+                    });
                 }
             }
             if i.key_pressed(Key::Enter) {
-                if let Some(s) = self.selected {
+                if let Some(s) = self.lead {
                     actions.push(Action::Activate(s));
                 }
             }
+            if cmd && i.key_pressed(Key::A) {
+                actions.push(Action::SelectAll);
+            }
             if cmd && i.key_pressed(Key::Backspace) {
                 // Finder: Cmd+Backspace = move to Trash; Cmd+Option+Backspace = delete immediately
-                if let Some(s) = self.selected {
-                    actions.push(Action::OpenDelete(s, i.modifiers.alt));
+                if !self.selected.is_empty() {
+                    actions.push(Action::OpenDelete(i.modifiers.alt));
                 }
             } else if i.key_pressed(Key::Backspace) || (cmd && i.key_pressed(Key::ArrowUp)) {
                 actions.push(Action::Up);
             }
             if cmd && i.key_pressed(Key::R) {
-                if let Some(s) = self.selected {
+                if let Some(s) = self.single_selected() {
                     actions.push(Action::OpenRename(s));
                 }
             }
@@ -744,7 +960,7 @@ impl eframe::App for Explorer {
         [0.0; 4]
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         self.devshot.tick(ui.ctx());
         // agent first: injected input must be visible to this frame's widgets
         self.agent.set_enabled(ui.ctx(), self.settings.agent);
@@ -755,6 +971,18 @@ impl eframe::App for Explorer {
         let ctx = ui.ctx().clone();
         self.poll_ops(&ctx, t);
         self.poll_loader(t);
+        while let Ok(result) = self.drag_out.1.try_recv() {
+            match result {
+                drag::DragResult::Dropped => {
+                    self.push_log(t, "drag out :: delivered to the OS target", Level::Ok);
+                    // the receiver may have moved the files; refresh the listing
+                    self.load(&ctx, self.cwd.clone());
+                }
+                drag::DragResult::Cancel => {
+                    self.push_log(t, "drag out :: cancelled", Level::Info);
+                }
+            }
+        }
         if self.dirty {
             self.rebuild_view();
         }
@@ -763,6 +991,12 @@ impl eframe::App for Explorer {
         let hidden = self.entries.iter().filter(|e| e.hidden).count();
 
         let mut actions: Vec<Action> = Vec::new();
+        // Dev aid: `FUIDE_DEV_SELECT=<n>` selects the first n rows after load (screenshots).
+        if let Some(n) = self.dev_select.take_if(|_| !self.view.is_empty()) {
+            for &idx in self.view.iter().take(n) {
+                actions.push(Action::SelectToggle(idx));
+            }
+        }
         if let Some(kind) = self.dev_dialog.take_if(|_| !self.view.is_empty()) {
             let first = self.view[0];
             actions.push(Action::Select(Some(first)));
@@ -772,8 +1006,8 @@ impl eframe::App for Explorer {
                     self.error_queue.push_back("delete // immutable.txt".into());
                     Action::Select(Some(first))
                 }
-                "delete" => Action::OpenDelete(first, true),
-                _ => Action::OpenDelete(first, false),
+                "delete" => Action::OpenDelete(true),
+                _ => Action::OpenDelete(false),
             });
         }
         if self.dialog.is_none() {
@@ -822,6 +1056,25 @@ impl eframe::App for Explorer {
             shell = shell.lamp(text, if busy { pal.warn } else { pal.accent }, busy);
         }
 
+        // drag & drop state for this frame: rows being dragged (in-app), the directory
+        // under the pointer (filled while widgets draw), and files hovered in from outside
+        let drag_paths: Option<Vec<PathBuf>> = self.drag.as_ref().map(|d| d.paths.clone());
+        let mut drop_target: Option<PathBuf> = None;
+        let drop_hover = ui.input(|i| !i.raw.hovered_files.is_empty());
+        let dropped: Vec<PathBuf> = ui.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            actions.push(Action::MoveTo {
+                dest: self.cwd.clone(),
+                paths: dropped,
+            });
+        }
+
         let log_open = self.settings.log_open;
         let mut log_resized = false;
         let mut log_toggled = false;
@@ -853,10 +1106,23 @@ impl eframe::App for Explorer {
             let listing =
                 Rect::from_min_max(pos2(center.left(), toolbar.bottom() + 12.0), center.max);
 
-            self.ui_locations(ui, locations, &mut actions);
+            self.ui_locations(
+                ui,
+                locations,
+                &mut actions,
+                drag_paths.as_deref(),
+                &mut drop_target,
+            );
             self.ui_storage(ui, storage);
             self.ui_toolbar(ui, toolbar, &mut actions);
-            self.ui_listing(ui, listing, &mut actions);
+            self.ui_listing(
+                ui,
+                listing,
+                &mut actions,
+                drag_paths.as_deref(),
+                &mut drop_target,
+                drop_hover,
+            );
             self.ui_inspector(ui, right, &mut actions);
             if log_open {
                 // draggable divider in the gap above the log panel; registered before the
@@ -879,6 +1145,7 @@ impl eframe::App for Explorer {
             log_toggled = self.ui_log(ui, log_rect, t, log_open);
         });
         self.agent.paint(&ctx);
+        self.handle_drag(ui, frame, drop_target, &mut actions, t);
         if out.settings_clicked {
             actions.push(Action::OpenSettings);
         }
@@ -911,7 +1178,141 @@ impl eframe::App for Explorer {
 }
 
 impl Explorer {
-    fn ui_locations(&self, ui: &mut Ui, rect: Rect, actions: &mut Vec<Action>) {
+    /// Per-frame life cycle of an in-app row drag: Esc cancels, releasing over a
+    /// directory moves the files there, leaving the window hands the drag to the OS
+    /// (Finder, browsers, ... take over), otherwise a ghost follows the pointer.
+    fn handle_drag(
+        &mut self,
+        ui: &Ui,
+        frame: &eframe::Frame,
+        drop_target: Option<PathBuf>,
+        actions: &mut Vec<Action>,
+        t: f64,
+    ) {
+        let Some(drag) = &self.drag else { return };
+        if ui.input(|i| i.key_pressed(Key::Escape)) {
+            self.drag = None;
+            return;
+        }
+        if ui.input(|i| i.pointer.any_released()) {
+            if let Some(dest) = drop_target {
+                actions.push(Action::MoveTo {
+                    dest,
+                    paths: drag.paths.clone(),
+                });
+            }
+            self.drag = None;
+            return;
+        }
+        let Some(ptr) = ui.input(|i| i.pointer.latest_pos()) else {
+            return;
+        };
+        if !ui.input(|i| i.content_rect()).contains(ptr) {
+            self.start_os_drag(ui, frame, t);
+            return;
+        }
+
+        // ghost: a small plate trailing the pointer (echo outline behind = "stack")
+        let pal = palette(ui.ctx());
+        let ts = type_scale(ui.ctx());
+        let p = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new("drag-ghost"),
+        ));
+        let galley = p.layout_no_wrap(drag.label.clone(), mono(ts.data), pal.accent);
+        let rect = Rect::from_min_size(
+            ptr + vec2(16.0, 12.0),
+            vec2(galley.size().x + 26.0, ts.row + 6.0),
+        );
+        p.rect_stroke(
+            rect.translate(vec2(4.0, 4.0)),
+            egui::CornerRadius::ZERO,
+            Stroke::new(1.0, pal.accent.gamma_multiply(0.25)),
+            egui::StrokeKind::Inside,
+        );
+        p.rect_filled(rect, egui::CornerRadius::ZERO, pal.bg_deep);
+        p.rect_stroke(
+            rect,
+            egui::CornerRadius::ZERO,
+            Stroke::new(1.0, pal.accent.gamma_multiply(0.9)),
+            egui::StrokeKind::Inside,
+        );
+        p.rect_filled(
+            Rect::from_min_size(rect.min, vec2(3.0, rect.height())),
+            egui::CornerRadius::ZERO,
+            pal.accent,
+        );
+        let ty = rect.center().y - galley.size().y / 2.0;
+        p.galley(pos2(rect.left() + 13.0, ty), galley, pal.accent);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+
+    /// Hand the active drag to macOS as an `NSDraggingSession` (`drag` crate): the files
+    /// can then be dropped on the Finder, browsers, or any other app. Copy semantics —
+    /// the receiver decides what to do with the file URLs.
+    fn start_os_drag(&mut self, ui: &Ui, frame: &eframe::Frame, t: f64) {
+        let Some(drag) = self.drag.take() else { return };
+        let label = drag.label.clone();
+        let badge =
+            crate::dragbadge::badge_png(drag.paths.len(), palette(ui.ctx()).accent.to_array());
+        let tx = self.drag_out.0.clone();
+        let ctx = ui.ctx().clone();
+        let result = drag::start_drag(
+            frame,
+            drag::DragItem::Files(drag.paths),
+            drag::Image::Raw(badge),
+            move |result, _cursor| {
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            },
+            drag::Options {
+                skip_animatation_on_cancel_or_failure: false,
+                mode: drag::DragMode::Copy,
+            },
+        );
+        match result {
+            Ok(()) => self.push_log(
+                t,
+                format!("drag out // {label} :: session handed to macOS"),
+                Level::Info,
+            ),
+            Err(e) => self.fail(t, format!("drag out // {label}"), &e.to_string()),
+        }
+    }
+
+    fn ui_locations(
+        &self,
+        ui: &mut Ui,
+        rect: Rect,
+        actions: &mut Vec<Action>,
+        drag_paths: Option<&[PathBuf]>,
+        drop_target: &mut Option<PathBuf>,
+    ) {
+        // while rows are dragged, a sidebar entry under the pointer becomes a move target
+        // (unless it is the current directory or inside the dragged items themselves)
+        let tab = |ui: &mut Ui,
+                   name: &str,
+                   path: &PathBuf,
+                   active: bool,
+                   actions: &mut Vec<Action>,
+                   drop_target: &mut Option<PathBuf>| {
+            let resp = widgets::nav_tab(ui, name, active);
+            if resp.clicked() {
+                actions.push(Action::Navigate(path.clone()));
+            }
+            if let Some(dragged) = drag_paths {
+                let valid = path != &self.cwd && !dragged.iter().any(|d| path.starts_with(d));
+                if valid && ui.rect_contains_pointer(resp.rect) {
+                    *drop_target = Some(path.clone());
+                    ui.painter().rect_stroke(
+                        resp.rect,
+                        egui::CornerRadius::ZERO,
+                        Stroke::new(1.5, palette(ui.ctx()).accent),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        };
         Panel::new("Locations").show_rect(ui, rect, |ui| {
             ScrollArea::vertical()
                 .id_salt("locations")
@@ -921,16 +1322,19 @@ impl Explorer {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     widgets::section_label(ui, "Places");
                     for (name, path) in &self.places {
-                        if widgets::nav_tab(ui, name, &self.cwd == path).clicked() {
-                            actions.push(Action::Navigate(path.clone()));
-                        }
+                        tab(ui, name, path, &self.cwd == path, actions, drop_target);
                     }
                     ui.add_space(6.0);
                     widgets::section_label(ui, "Volumes");
                     for (name, path) in &self.volumes {
-                        if widgets::nav_tab(ui, name, self.cwd.starts_with(path)).clicked() {
-                            actions.push(Action::Navigate(path.clone()));
-                        }
+                        tab(
+                            ui,
+                            name,
+                            path,
+                            self.cwd.starts_with(path),
+                            actions,
+                            drop_target,
+                        );
                     }
                 });
         });
@@ -1121,7 +1525,15 @@ impl Explorer {
         }
     }
 
-    fn ui_listing(&mut self, ui: &mut Ui, rect: Rect, actions: &mut Vec<Action>) {
+    fn ui_listing(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        actions: &mut Vec<Action>,
+        drag_paths: Option<&[PathBuf]>,
+        drop_target: &mut Option<PathBuf>,
+        drop_hover: bool,
+    ) {
         let pal = palette(ui.ctx());
         let ts = type_scale(ui.ctx());
         let row_h = ts.row;
@@ -1130,16 +1542,23 @@ impl Explorer {
             None => ("Directory", pal.text_dim),
             Some(_) => ("Directory :: access denied", pal.danger),
         };
-        let selected = self.selected;
+        let mut scroll_to = None;
+        if self.scroll_to_selected {
+            scroll_to = self
+                .lead
+                .and_then(|s| self.view.iter().position(|&v| v == s));
+        }
+        self.scroll_to_selected = false;
+        let selected = &self.selected;
         let view = &self.view;
         let entries = &self.entries;
         let sort_key = self.sort_key;
         let sort_desc = self.sort_desc;
-        let mut scroll_to = None;
-        if self.scroll_to_selected {
-            scroll_to = selected.and_then(|s| view.iter().position(|&v| v == s));
-        }
-        self.scroll_to_selected = false;
+        let cwd_label = self
+            .cwd
+            .file_name()
+            .map(|s| s.to_string_lossy().to_uppercase())
+            .unwrap_or_else(|| "ROOT".into());
 
         Panel::new(title)
             .tag(count_tag, title_tag_color)
@@ -1237,11 +1656,12 @@ impl Explorer {
                         for row in range {
                             let idx = view[row];
                             let e = &entries[idx];
-                            let (r, resp) = ui.allocate_exact_size(vec2(w, row_h), Sense::click());
+                            let (r, resp) =
+                                ui.allocate_exact_size(vec2(w, row_h), Sense::click_and_drag());
                             if scroll_to == Some(row) {
                                 resp.scroll_to_me(None);
                             }
-                            let is_sel = selected == Some(idx);
+                            let is_sel = selected.contains(&idx);
                             // rows are addressable by file name (UI tests, assistive tech)
                             fuide::agent::describe(&resp, || {
                                 egui::WidgetInfo::selected(
@@ -1275,6 +1695,26 @@ impl Explorer {
                                     egui::CornerRadius::ZERO,
                                     pal.accent.gamma_multiply(0.02),
                                 );
+                            }
+                            // a directory row under an active drag is a move target
+                            if let Some(dragged) = drag_paths {
+                                if e.navigates()
+                                    && !dragged.contains(&e.path)
+                                    && ui.rect_contains_pointer(r)
+                                {
+                                    *drop_target = Some(e.path.clone());
+                                    p.rect_filled(
+                                        r,
+                                        egui::CornerRadius::ZERO,
+                                        pal.accent.gamma_multiply(0.10),
+                                    );
+                                    p.rect_stroke(
+                                        r,
+                                        egui::CornerRadius::ZERO,
+                                        Stroke::new(1.5, pal.accent),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
                             }
                             let name_color = if e.hidden {
                                 pal.text_dim
@@ -1338,10 +1778,21 @@ impl Explorer {
                                 mono(ts.label),
                                 pal.text_dim,
                             );
+                            if resp.drag_started_by(egui::PointerButton::Primary) {
+                                actions.push(Action::BeginDrag(idx));
+                            }
                             if resp.double_clicked() {
                                 actions.push(Action::Activate(idx));
                             } else if resp.clicked() {
-                                actions.push(Action::Select(Some(idx)));
+                                // Finder-style modifiers: Cmd toggles, Shift extends
+                                let mods = ui.input(|i| i.modifiers);
+                                actions.push(if mods.command {
+                                    Action::SelectToggle(idx)
+                                } else if mods.shift {
+                                    Action::SelectRange(idx)
+                                } else {
+                                    Action::Select(Some(idx))
+                                });
                             }
                         }
                         if view.is_empty() {
@@ -1355,13 +1806,47 @@ impl Explorer {
                             );
                         }
                     });
+
+                // files hovered in from another app (Finder, browser, ...): dropping
+                // anywhere on the window moves them into the current directory
+                if drop_hover {
+                    let inner = ui.max_rect();
+                    let p = ui.painter();
+                    p.rect_filled(
+                        inner,
+                        egui::CornerRadius::ZERO,
+                        pal.accent.gamma_multiply(0.06),
+                    );
+                    p.rect_stroke(
+                        inner.shrink(2.0),
+                        egui::CornerRadius::ZERO,
+                        Stroke::new(1.5, pal.accent),
+                        egui::StrokeKind::Inside,
+                    );
+                    let caption = format!("DROP // MOVE INTO {cwd_label}");
+                    let galley = fuide::display_galley(p, caption, ts.heading + 3.0, pal.accent);
+                    let plate =
+                        Rect::from_center_size(inner.center(), galley.size() + vec2(28.0, 18.0));
+                    p.rect_filled(plate, egui::CornerRadius::ZERO, pal.bg_deep);
+                    p.rect_stroke(
+                        plate,
+                        egui::CornerRadius::ZERO,
+                        Stroke::new(1.0, pal.accent),
+                        egui::StrokeKind::Inside,
+                    );
+                    p.galley(plate.center() - galley.size() / 2.0, galley, pal.accent);
+                }
             });
     }
 
     fn ui_inspector(&self, ui: &mut Ui, rect: Rect, actions: &mut Vec<Action>) {
         let pal = palette(ui.ctx());
         let ts = type_scale(ui.ctx());
-        let sel = self.selected.map(|i| &self.entries[i]);
+        if self.selected.len() > 1 {
+            self.ui_inspector_multi(ui, rect, actions);
+            return;
+        }
+        let sel = self.single_selected().map(|i| &self.entries[i]);
         let tag = match sel {
             Some(e) => e.kind.tag().to_string(),
             None => "cwd".to_string(),
@@ -1533,13 +2018,13 @@ impl Explorer {
                         actions.push(Action::Reveal(path.clone()));
                     }
                     if widgets::button(ui, bsz, "COPY", true).clicked() {
-                        actions.push(Action::CopyPath(path.clone()));
+                        actions.push(Action::CopyPaths(vec![path.clone()]));
                     }
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    let sel_idx = self.selected;
+                    let sel_idx = self.single_selected();
                     if widgets::button(ui, vec2(80.0, ts.row), "RENAME", sel_idx.is_some())
                         .clicked()
                     {
@@ -1555,16 +2040,18 @@ impl Explorer {
                         pal.warn,
                     )
                     .clicked()
+                        && sel_idx.is_some()
                     {
-                        if let Some(i) = sel_idx {
-                            actions.push(Action::OpenDelete(i, false));
-                        }
+                        actions.push(Action::OpenDelete(false));
                     }
                 });
                 ui.add_space(8.0);
                 let lh = ts.small + 5.0;
                 let hints = [
-                    "KEYS :: UP/DN SELECT  ENTER OPEN  BKSP UP",
+                    "KEYS :: UP/DN SELECT  +SHIFT EXTEND",
+                    "CMD+A ALL  ENTER OPEN  BKSP UP",
+                    "CLICK :: CMD TOGGLE  SHIFT RANGE",
+                    "DRAG ROWS :: DIR = MOVE  OUTSIDE = OS",
                     "CMD+[ / ]  MOUSE 4/5 :: HISTORY",
                     "CMD+R RENAME  CMD+BKSP TRASH  +OPT DELETE",
                     "CMD+1..3 PALETTE  CMD+, SETTINGS",
@@ -1583,6 +2070,83 @@ impl Explorer {
                         pal.text_dim,
                     );
                 }
+            });
+    }
+
+    /// Inspector when several rows are selected: aggregate stats and bulk actions.
+    fn ui_inspector_multi(&self, ui: &mut Ui, rect: Rect, actions: &mut Vec<Action>) {
+        let pal = palette(ui.ctx());
+        let ts = type_scale(ui.ctx());
+        let items: Vec<&Entry> = self
+            .selected
+            .iter()
+            .filter_map(|&i| self.entries.get(i))
+            .collect();
+        let dirs = items.iter().filter(|e| e.is_dir).count();
+        let bytes: u64 = items.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
+        Panel::new("Inspector")
+            .tag("multi", pal.text_dim)
+            .show_rect(ui, rect, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{} ITEMS SELECTED", items.len()))
+                            .font(mono(ts.data + 3.0))
+                            .color(pal.accent),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+                widgets::rule(ui);
+                widgets::readout(ui, "items", &items.len().to_string(), None);
+                widgets::readout(ui, "dirs", &dirs.to_string(), None);
+                widgets::readout(ui, "files", &(items.len() - dirs).to_string(), None);
+                widgets::readout(ui, "bytes", &fs::fmt_size(bytes), None);
+                ui.add_space(6.0);
+                widgets::rule(ui);
+                const SHOWN: usize = 9;
+                for e in items.iter().take(SHOWN) {
+                    widgets::readout(ui, e.kind.tag(), &e.name, None);
+                }
+                if items.len() > SHOWN {
+                    widgets::readout(
+                        ui,
+                        "",
+                        &format!("+ {} MORE", items.len() - SHOWN),
+                        Some(pal.text_dim),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if widgets::button(ui, vec2(80.0, ts.row), "COPY", true).clicked() {
+                        actions.push(Action::CopyPaths(
+                            items.iter().map(|e| e.path.clone()).collect(),
+                        ));
+                    }
+                    if widgets::button_colored(ui, vec2(80.0, ts.row), "TRASH", true, pal.warn)
+                        .clicked()
+                    {
+                        actions.push(Action::OpenDelete(false));
+                    }
+                    if widgets::button_colored(ui, vec2(80.0, ts.row), "DELETE", true, pal.danger)
+                        .clicked()
+                    {
+                        actions.push(Action::OpenDelete(true));
+                    }
+                });
+                ui.add_space(8.0);
+                let (fr, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), ts.small + 5.0),
+                    Sense::hover(),
+                );
+                ui.painter().text(
+                    pos2(fr.left(), fr.center().y),
+                    Align2::LEFT_CENTER,
+                    "DRAG :: DIR = MOVE  OUTSIDE = OS",
+                    mono(ts.small),
+                    pal.text_dim,
+                );
             });
     }
 
@@ -1650,8 +2214,11 @@ impl Explorer {
                     actions.push(Action::ConfirmRename);
                 }
             }
-            DialogState::Delete { idx, permanent } => {
-                let entry = &self.entries[*idx];
+            DialogState::Delete { indices, permanent } => {
+                let items: Vec<&Entry> = indices
+                    .iter()
+                    .filter_map(|&i| self.entries.get(i))
+                    .collect();
                 let (title, color, verb, note) = if *permanent {
                     (
                         "Delete",
@@ -1667,33 +2234,74 @@ impl Explorer {
                         "RECOVERABLE FROM THE FINDER TRASH",
                     )
                 };
+                let tag = match &items[..] {
+                    [e] => e.kind.tag().to_string(),
+                    _ => format!("{} items", items.len()),
+                };
                 let resp = Dialog::new(title)
-                    .tag(entry.kind.tag(), pal.text_dim)
+                    .tag(tag, pal.text_dim)
                     .outline(color)
                     .width(460.0)
                     .show(ctx, open, |ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&entry.name)
-                                    .font(mono(ts.data + 2.0))
-                                    .color(pal.accent),
-                            )
-                            .wrap(),
-                        );
-                        ui.add_space(4.0);
-                        widgets::readout(ui, "kind", entry.kind.tag(), None);
-                        widgets::readout(
-                            ui,
-                            "size",
-                            &if entry.is_dir {
-                                "-- (recursive)".into()
-                            } else {
-                                fs::fmt_size(entry.size)
-                            },
-                            None,
-                        );
-                        widgets::readout(ui, "modified", &fs::fmt_time(entry.modified), None);
+                        match &items[..] {
+                            [entry] => {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&entry.name)
+                                            .font(mono(ts.data + 2.0))
+                                            .color(pal.accent),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.add_space(4.0);
+                                widgets::readout(ui, "kind", entry.kind.tag(), None);
+                                widgets::readout(
+                                    ui,
+                                    "size",
+                                    &if entry.is_dir {
+                                        "-- (recursive)".into()
+                                    } else {
+                                        fs::fmt_size(entry.size)
+                                    },
+                                    None,
+                                );
+                                widgets::readout(
+                                    ui,
+                                    "modified",
+                                    &fs::fmt_time(entry.modified),
+                                    None,
+                                );
+                            }
+                            _ => {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!("{} ITEMS", items.len()))
+                                            .font(mono(ts.data + 2.0))
+                                            .color(pal.accent),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.add_space(4.0);
+                                const SHOWN: usize = 6;
+                                for e in items.iter().take(SHOWN) {
+                                    widgets::readout(ui, e.kind.tag(), &e.name, None);
+                                }
+                                if items.len() > SHOWN {
+                                    widgets::readout(
+                                        ui,
+                                        "",
+                                        &format!("+ {} MORE", items.len() - SHOWN),
+                                        Some(pal.text_dim),
+                                    );
+                                }
+                                let dirs = items.iter().filter(|e| e.is_dir).count();
+                                let bytes: u64 =
+                                    items.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
+                                widgets::readout(ui, "dirs", &dirs.to_string(), None);
+                                widgets::readout(ui, "files bytes", &fs::fmt_size(bytes), None);
+                            }
+                        }
                         ui.add_space(6.0);
                         widgets::rule(ui);
                         ui.horizontal(|ui| {

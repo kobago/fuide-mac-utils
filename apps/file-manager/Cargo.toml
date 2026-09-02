@@ -17,6 +17,7 @@ chrono = "0.4"
 open = "5"
 libc = "0.2"
 trash = "5"
+drag = "2.1.1"
 
 [dev-dependencies]
 # end-to-end tests: the whole eframe app driven through the accessibility tree (`src/app/e2e.rs`)

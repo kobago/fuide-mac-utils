@@ -308,6 +308,50 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// Move `src` into the directory `dest_dir`, keeping its name. Falls back to copy + delete
+/// when the destination is on another volume (`EXDEV`). Rejects self-moves and collisions.
+pub fn move_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    let Some(name) = src.file_name() else {
+        return Err("cannot move the root".into());
+    };
+    if src.parent() == Some(dest_dir) {
+        return Err("already in this directory".into());
+    }
+    if dest_dir.starts_with(src) {
+        return Err("cannot move a directory into itself".into());
+    }
+    let target = dest_dir.join(name);
+    if target.exists() || std::fs::symlink_metadata(&target).is_ok() {
+        return Err(format!("'{}' already exists here", name.to_string_lossy()));
+    }
+    match std::fs::rename(src, &target) {
+        Ok(()) => Ok(target),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            copy_recursive(src, &target).map_err(|e| e.to_string())?;
+            remove(src)?;
+            Ok(target)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Copy a tree preserving symlinks (as links, never followed).
+fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
+    } else if meta.is_dir() {
+        std::fs::create_dir(dst)?;
+        for e in std::fs::read_dir(src)? {
+            let e = e?;
+            copy_recursive(&e.path(), &dst.join(e.file_name()))?;
+        }
+    } else {
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
 /// Move to the macOS Trash (`NSFileManager.trashItem`, via the `trash` crate). Undoable from the
 /// Finder. No Apple Events / Automation permission needed. Callers run it on a thread.
 pub fn trash(path: &Path) -> Result<(), String> {
@@ -411,6 +455,56 @@ mod tests {
         let b = rename(&a, "  b.txt ").unwrap();
         assert_eq!(b, dir.join("b.txt"));
         assert!(!a.exists() && b.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_into_relocates_and_rejects_noops_collisions_and_cycles() {
+        let dir = scratch("move");
+        let sub = dir.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "x").unwrap();
+        std::fs::write(sub.join("taken.txt"), "y").unwrap();
+
+        assert!(move_into(&a, &dir).is_err(), "same parent is a no-op");
+        assert!(
+            move_into(&sub, &sub).is_err(),
+            "directory into itself is rejected"
+        );
+        std::fs::write(sub.join("a.txt"), "z").unwrap();
+        assert!(move_into(&a, &sub).is_err(), "collision is rejected");
+        std::fs::remove_file(sub.join("a.txt")).unwrap();
+
+        let target = move_into(&a, &sub).unwrap();
+        assert_eq!(target, sub.join("a.txt"));
+        assert!(!a.exists() && target.exists());
+
+        // a directory moves with its contents
+        let deep = dir.join("deep");
+        std::fs::create_dir(&deep).unwrap();
+        std::fs::write(deep.join("k.txt"), "k").unwrap();
+        move_into(&deep, &sub).unwrap();
+        assert!(sub.join("deep/k.txt").exists() && !deep.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_recursive_preserves_trees_and_symlinks() {
+        let dir = scratch("copytree");
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("inner/f.txt"), "f").unwrap();
+        std::os::unix::fs::symlink("inner/f.txt", src.join("ln")).unwrap();
+
+        let dst = dir.join("dst");
+        copy_recursive(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("inner/f.txt")).unwrap(),
+            "f"
+        );
+        let meta = std::fs::symlink_metadata(dst.join("ln")).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink copied as a link");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
