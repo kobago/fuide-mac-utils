@@ -328,3 +328,45 @@ fn the_gear_opens_settings_and_a_palette_click_restyles_and_saves() {
         "settings window is gone"
     );
 }
+
+#[test]
+fn cmd_c_and_cmd_v_duplicate_a_row_and_cmd_x_moves_it() {
+    let fx = fixture("e2e-clipboard");
+    let mut h = harness(&fx.root);
+
+    // egui-winit turns Cmd+C / X / V into these events (no key press reaches the app); the
+    // paste event carries whatever text the OS clipboard holds, here the path Cmd+C wrote
+    h.get_by_label("b.txt").click();
+    h.run_steps(2);
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+    assert!(h.state().clipboard.as_ref().is_some_and(|c| !c.cut));
+    let os_text = fx.root.join("b.txt").display().to_string();
+    assert_eq!(h.state().clipboard.as_ref().unwrap().text, os_text);
+    h.event(egui::Event::Paste(os_text));
+    settle(&mut h);
+    assert_eq!(names(&h), ["docs", "Music", "A.md", "b copy.txt", "b.txt"]);
+    assert_eq!(
+        h.get_by_role_and_label(Role::Button, "b copy.txt")
+            .accesskit_node()
+            .toggled(),
+        Some(Toggled::True)
+    );
+
+    // Cmd+X on A.md, Enter into docs, Cmd+V: the file moved and the clipboard is empty
+    h.get_by_label("A.md").click();
+    h.run_steps(2);
+    h.event(egui::Event::Cut);
+    h.run_steps(2);
+    assert!(h.state().clipboard.as_ref().is_some_and(|c| c.cut));
+    let os_text = h.state().clipboard.as_ref().unwrap().text.clone();
+    h.get_by_label("docs").click();
+    h.run_steps(2);
+    h.key_press(Key::Enter);
+    settle(&mut h);
+    h.event(egui::Event::Paste(os_text));
+    settle(&mut h);
+    assert_eq!(names(&h), ["A.md", "inner.txt"]);
+    assert!(!fx.root.join("A.md").exists());
+    assert!(h.state().clipboard.is_none());
+}

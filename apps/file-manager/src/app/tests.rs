@@ -365,3 +365,134 @@ fn palette_shortcut_applies_the_theme_and_settings_are_saved_where_asked() {
     app.settings_changed(2.0);
     assert!(Settings::load_from(&conf).unwrap().chamfer);
 }
+
+#[test]
+fn copy_and_paste_duplicate_the_selection_with_finder_style_names() {
+    let fx = fixture("copy-paste");
+    let (ctx, mut app) = app(&fx.root);
+
+    // nothing selected: Cmd+C is a no-op
+    app.apply(&ctx, Action::Copy, 0.0);
+    assert!(app.clipboard.is_none());
+
+    let b = idx_of(&app, "b.txt");
+    app.apply(&ctx, Action::Select(Some(b)), 0.0);
+    app.apply(&ctx, Action::Copy, 0.0);
+    assert!(matches!(&app.clipboard, Some(c) if !c.cut && c.paths == vec![fx.root.join("b.txt")]));
+    assert!(log_has(&app, "copy // b.txt"));
+
+    // pasting into the same directory duplicates as `b copy.txt`, which gets selected
+    app.apply(&ctx, Action::Paste(None), 0.0);
+    settle(&ctx, &mut app);
+    assert_eq!(
+        names(&app),
+        ["docs", "Music", "A.md", "b copy.txt", "b.txt"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.root.join("b copy.txt")).unwrap(),
+        "bb"
+    );
+    assert_eq!(app.lead, Some(idx_of(&app, "b copy.txt")));
+    assert!(log_has(&app, "paste // b.txt -> "));
+    assert!(log_has(&app, ":: done"));
+
+    // a copy stays on the clipboard: pasting again yields `b copy 2.txt`
+    app.apply(&ctx, Action::Paste(None), 0.0);
+    settle(&ctx, &mut app);
+    assert!(fx.root.join("b copy 2.txt").exists());
+    assert!(app.clipboard.is_some());
+
+    // pasting elsewhere keeps the original name; the source is untouched
+    app.apply(&ctx, Action::Navigate(fx.root.join("docs")), 0.0);
+    settle(&ctx, &mut app);
+    app.apply(&ctx, Action::Paste(None), 0.0);
+    settle(&ctx, &mut app);
+    assert!(fx.root.join("docs/b.txt").exists() && fx.root.join("b.txt").exists());
+    assert_eq!(names(&app), ["b.txt", "inner.txt"]);
+}
+
+#[test]
+fn cut_and_paste_move_the_selection_and_empty_the_clipboard() {
+    let fx = fixture("cut-paste");
+    let (ctx, mut app) = app(&fx.root);
+    let a = idx_of(&app, "A.md");
+    let music = idx_of(&app, "Music");
+    app.apply(&ctx, Action::Select(Some(a)), 0.0);
+    app.apply(&ctx, Action::SelectToggle(music), 0.0);
+    app.apply(&ctx, Action::Cut, 0.0);
+    assert!(matches!(&app.clipboard, Some(c) if c.cut && c.paths.len() == 2));
+    assert!(log_has(&app, "cut // 2 items"));
+
+    // pasting where the files already live does nothing (but still consumes the cut)
+    app.apply(&ctx, Action::Paste(None), 0.0);
+    settle(&ctx, &mut app);
+    assert!(app.clipboard.is_none());
+    assert_eq!(names(&app), ["docs", "Music", "A.md", "b.txt"]);
+
+    app.apply(&ctx, Action::Select(Some(idx_of(&app, "A.md"))), 0.0);
+    app.apply(&ctx, Action::SelectToggle(idx_of(&app, "Music")), 0.0);
+    app.apply(&ctx, Action::Cut, 0.0);
+    app.apply(&ctx, Action::Navigate(fx.root.join("docs")), 0.0);
+    settle(&ctx, &mut app);
+    app.apply(&ctx, Action::Paste(None), 0.0);
+    settle(&ctx, &mut app);
+    assert_eq!(names(&app), ["Music", "A.md", "inner.txt"]);
+    assert!(!fx.root.join("A.md").exists() && !fx.root.join("Music").exists());
+    assert!(app.clipboard.is_none(), "a cut is one-shot");
+    assert!(log_has(&app, "move // 2 items -> docs :: done"));
+
+    // a collision on a move is reported instead of overwriting
+    std::fs::write(fx.root.join("A.md"), "other").unwrap();
+    app.apply(&ctx, Action::Select(Some(idx_of(&app, "A.md"))), 0.0);
+    app.apply(&ctx, Action::Cut, 0.0);
+    app.apply(&ctx, Action::Navigate(fx.root.clone()), 0.0);
+    settle(&ctx, &mut app);
+    app.apply(&ctx, Action::Paste(None), 0.0);
+    settle(&ctx, &mut app);
+    assert!(log_has(&app, "A.md: 'A.md' already exists here"));
+    assert_eq!(
+        std::fs::read_to_string(fx.root.join("A.md")).unwrap(),
+        "other"
+    );
+    assert!(fx.root.join("docs/A.md").exists());
+}
+
+#[test]
+fn cmd_c_writes_the_paths_as_text_and_a_foreign_paste_supersedes_the_files() {
+    let fx = fixture("clipboard-os");
+    let (ctx, mut app) = app(&fx.root);
+    app.apply(&ctx, Action::Select(Some(idx_of(&app, "b.txt"))), 0.0);
+    app.apply(&ctx, Action::SelectToggle(idx_of(&app, "A.md")), 0.0);
+    app.apply(&ctx, Action::Copy, 0.0);
+    // one path per line (entry order); this is also what egui hands to the OS clipboard
+    let expect = app.clipboard.as_ref().unwrap().text.clone();
+    let mut lines: Vec<&str> = expect.lines().collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        [
+            fx.root.join("A.md").display().to_string(),
+            fx.root.join("b.txt").display().to_string()
+        ]
+    );
+    assert!(ctx.output(|o| o
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if *t == expect))));
+
+    // Cmd+V while the OS clipboard still holds our text pastes the files
+    app.apply(&ctx, Action::Paste(Some(expect.clone())), 0.0);
+    settle(&ctx, &mut app);
+    assert!(fx.root.join("b copy.txt").exists() && fx.root.join("A copy.md").exists());
+
+    // text copied elsewhere in the meantime: nothing is pasted and the files are forgotten
+    app.apply(
+        &ctx,
+        Action::Paste(Some("hello from another app".into())),
+        0.0,
+    );
+    settle(&ctx, &mut app);
+    assert!(app.clipboard.is_none());
+    assert!(!fx.root.join("b copy 2.txt").exists());
+    assert!(log_has(&app, "paste // clipboard was replaced elsewhere"));
+}

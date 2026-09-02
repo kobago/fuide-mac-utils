@@ -77,6 +77,29 @@ struct DragState {
     label: String,
 }
 
+/// Files taken by Cmd+C / Cmd+X, waiting for Cmd+V. The files themselves live here; the OS
+/// clipboard gets their paths as text (`text`), which also makes egui deliver a
+/// `Event::Paste` on Cmd+V (it stays silent when the OS clipboard is empty). If the OS
+/// clipboard holds something else by the time Cmd+V arrives, the files were superseded —
+/// like the Finder after copying text elsewhere. A cut is one-shot and clears on paste; a
+/// copy can be pasted repeatedly.
+struct Clipboard {
+    paths: Vec<PathBuf>,
+    cut: bool,
+    /// What was written to the OS clipboard: the paths, one per line.
+    text: String,
+}
+
+impl Clipboard {
+    fn label(&self) -> String {
+        format!(
+            "{} {}",
+            self.paths.len(),
+            if self.cut { "CUT" } else { "COPIED" }
+        )
+    }
+}
+
 enum Action {
     OpenRename(usize),
     /// Confirmation dialog for the current selection (`true` = permanent).
@@ -95,7 +118,14 @@ enum Action {
     Activate(usize),
     Open(PathBuf),
     Reveal(PathBuf),
+    /// Copy the selected paths as text (inspector `PATH` button).
     CopyPaths(Vec<PathBuf>),
+    /// Cmd+C / Cmd+X: put the selection on the in-app clipboard.
+    Copy,
+    Cut,
+    /// Cmd+V: copy or move the clipboard into the current directory. Carries the OS
+    /// clipboard text when the request came from the OS paste event (`None` for the button).
+    Paste(Option<String>),
     Sort(SortKey),
     Palette(PaletteKind),
     OpenSettings,
@@ -126,6 +156,8 @@ pub struct Explorer {
     anchor: Option<usize>,
     /// An in-app drag of listing rows (`Action::BeginDrag`).
     drag: Option<DragState>,
+    /// Cmd+C / Cmd+X selection waiting for Cmd+V.
+    clipboard: Option<Clipboard>,
     /// Results of OS drag-out sessions (`drag::start_drag` callback, any thread).
     drag_out: (
         std::sync::mpsc::Sender<drag::DragResult>,
@@ -208,6 +240,7 @@ impl Explorer {
             lead: None,
             anchor: None,
             drag: None,
+            clipboard: None,
             drag_out: std::sync::mpsc::channel(),
             history: vec![home.clone()],
             hist_pos: 0,
@@ -327,6 +360,25 @@ impl Explorer {
         }
         if let Some(d) = &self.drag {
             let _ = writeln!(s, "dragging: {} (drop on a directory to move)", d.label);
+        }
+        if let Some(c) = &self.clipboard {
+            let names: Vec<String> = c
+                .paths
+                .iter()
+                .map(|p| {
+                    p.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            let _ = writeln!(
+                s,
+                "clipboard: {} items {} ({}); cmd+v pastes into cwd",
+                c.paths.len(),
+                if c.cut { "cut" } else { "copied" },
+                names.join(", ")
+            );
         }
         if self.pending.is_some() {
             s.push_str("loading: directory read in progress\n");
@@ -764,14 +816,7 @@ impl Explorer {
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "/".into());
-                let what = match &paths[..] {
-                    [p] => p
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    _ => format!("{} items", paths.len()),
-                };
-                let label = format!("move // {what} -> {dest_name}");
+                let label = format!("move // {} -> {dest_name}", Self::describe(&paths));
                 self.push_log(t, &label, Level::Warn);
                 // when files land in the visible directory, select the first arrival
                 if dest == self.cwd {
@@ -826,6 +871,78 @@ impl Explorer {
                     Level::Info,
                 );
             }
+            Action::Copy | Action::Cut => {
+                let cut = matches!(action, Action::Cut);
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    return;
+                }
+                self.push_log(
+                    t,
+                    format!(
+                        "{} // {}",
+                        if cut { "cut" } else { "copy" },
+                        Self::describe(&paths)
+                    ),
+                    Level::Info,
+                );
+                let text: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                let text = text.join("\n");
+                ctx.copy_text(text.clone());
+                self.clipboard = Some(Clipboard { paths, cut, text });
+            }
+            Action::Paste(os_text) => {
+                let Some(clip) = self.clipboard.take() else {
+                    return;
+                };
+                if os_text.is_some_and(|t| t != clip.text) {
+                    // something else was copied since (text in another app, files in the
+                    // Finder): the file clipboard is stale
+                    self.push_log(t, "paste // clipboard was replaced elsewhere", Level::Info);
+                    return;
+                }
+                let dest = self.cwd.clone();
+                if clip.cut {
+                    // a cut is one-shot: the clipboard is already empty
+                    self.apply(
+                        ctx,
+                        Action::MoveTo {
+                            dest,
+                            paths: clip.paths,
+                        },
+                        t,
+                    );
+                    return;
+                }
+                let pairs = fs::paste_targets(&dest, &clip.paths);
+                self.clipboard = Some(clip); // a copy can be pasted again
+                if pairs.is_empty() {
+                    return;
+                }
+                let srcs: Vec<PathBuf> = pairs.iter().map(|(s, _)| s.clone()).collect();
+                let label = format!(
+                    "paste // {} -> {}",
+                    Self::describe(&srcs),
+                    dest.file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "/".into())
+                );
+                self.push_log(t, &label, Level::Warn);
+                self.select_after_load = pairs[0]
+                    .1
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned());
+                self.ops.spawn(label, ctx.clone(), move || {
+                    for (src, target) in &pairs {
+                        let name = src
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        fs::copy_to(src, target).map_err(|e| format!("{name}: {e}"))?;
+                    }
+                    Ok(())
+                });
+            }
             Action::Sort(k) => {
                 if self.sort_key == k {
                     self.sort_desc = !self.sort_desc;
@@ -841,6 +958,17 @@ impl Explorer {
                 self.settings_changed(t);
             }
             Action::OpenSettings => self.settings_win.open(),
+        }
+    }
+
+    /// Log label for a set of paths: the file name, or `N items`.
+    fn describe(paths: &[PathBuf]) -> String {
+        match paths {
+            [p] => p
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            _ => format!("{} items", paths.len()),
         }
     }
 
@@ -891,6 +1019,16 @@ impl Explorer {
         if ui.memory(|m| m.focused().is_some()) {
             return; // text field owns the keyboard
         }
+        // Finder-style clipboard for files. egui-winit turns Cmd+C / X / V into
+        // `Event::Copy` / `Cut` / `Paste` and swallows the key press, so those events are
+        // the real trigger; the key checks cover backends that send plain keys
+        // (egui_kittest). Cmd+C / X leave a text selection in the log alone (egui copies
+        // it). Read outside `ui.input` — the plugin takes the context lock.
+        let text_selected = ui
+            .ctx()
+            .plugin::<egui::text_selection::LabelSelectionState>()
+            .lock()
+            .has_selection();
         ui.input(|i| {
             let cmd = i.modifiers.command;
             if i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::ArrowUp) {
@@ -918,6 +1056,27 @@ impl Explorer {
             }
             if cmd && i.key_pressed(Key::A) {
                 actions.push(Action::SelectAll);
+            }
+            let mut paste: Option<Option<String>> = None;
+            for ev in &i.events {
+                match ev {
+                    egui::Event::Copy if !text_selected => actions.push(Action::Copy),
+                    egui::Event::Cut if !text_selected => actions.push(Action::Cut),
+                    egui::Event::Paste(text) => paste = Some(Some(text.clone())),
+                    _ => {}
+                }
+            }
+            if cmd && i.key_pressed(Key::C) && !text_selected {
+                actions.push(Action::Copy);
+            }
+            if cmd && i.key_pressed(Key::X) && !text_selected {
+                actions.push(Action::Cut);
+            }
+            if cmd && i.key_pressed(Key::V) && paste.is_none() {
+                paste = Some(None);
+            }
+            if let Some(os_text) = paste {
+                actions.push(Action::Paste(os_text));
             }
             if cmd && i.key_pressed(Key::Backspace) {
                 // Finder: Cmd+Backspace = move to Trash; Cmd+Option+Backspace = delete immediately
@@ -1051,6 +1210,13 @@ impl eframe::App for Explorer {
         }
         if self.ops.busy() {
             shell = shell.lamp("FS WRITE", pal.warn, true);
+        }
+        if let Some(c) = &self.clipboard {
+            shell = shell.lamp(
+                format!("CLIP {}", c.label()),
+                if c.cut { pal.warn } else { pal.accent },
+                false,
+            );
         }
         if let Some((text, busy)) = self.agent.lamp() {
             shell = shell.lamp(text, if busy { pal.warn } else { pal.accent }, busy);
@@ -1550,6 +1716,11 @@ impl Explorer {
         }
         self.scroll_to_selected = false;
         let selected = &self.selected;
+        // rows waiting on a Cmd+X are drawn faded until they are pasted
+        let cut_paths: &[PathBuf] = match &self.clipboard {
+            Some(c) if c.cut => &c.paths,
+            _ => &[],
+        };
         let view = &self.view;
         let entries = &self.entries;
         let sort_key = self.sort_key;
@@ -1716,13 +1887,16 @@ impl Explorer {
                                     );
                                 }
                             }
-                            let name_color = if e.hidden {
+                            let mut name_color = if e.hidden {
                                 pal.text_dim
                             } else if e.is_dir {
                                 pal.accent
                             } else {
                                 pal.text
                             };
+                            if cut_paths.contains(&e.path) {
+                                name_color = name_color.gamma_multiply(0.45);
+                            }
                             let cy = r.center().y;
                             // name (clipped to its column)
                             let name_clip = Rect::from_min_max(
@@ -2017,10 +2191,12 @@ impl Explorer {
                     if widgets::button(ui, vec2(80.0, ts.row), "FINDER", true).clicked() {
                         actions.push(Action::Reveal(path.clone()));
                     }
-                    if widgets::button(ui, bsz, "COPY", true).clicked() {
+                    if widgets::button(ui, bsz, "PATH", true).clicked() {
                         actions.push(Action::CopyPaths(vec![path.clone()]));
                     }
                 });
+                ui.add_space(6.0);
+                self.ui_clipboard_buttons(ui, actions);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -2047,14 +2223,14 @@ impl Explorer {
                 });
                 ui.add_space(8.0);
                 let lh = ts.small + 5.0;
+                // six lines of <= 41 chars: the inspector must still fit above the log at 1280x800
                 let hints = [
                     "KEYS :: UP/DN SELECT  +SHIFT EXTEND",
                     "CMD+A ALL  ENTER OPEN  BKSP UP",
-                    "CLICK :: CMD TOGGLE  SHIFT RANGE",
-                    "DRAG ROWS :: DIR = MOVE  OUTSIDE = OS",
-                    "CMD+[ / ]  MOUSE 4/5 :: HISTORY",
+                    "CMD+C COPY  CMD+X CUT  CMD+V PASTE",
                     "CMD+R RENAME  CMD+BKSP TRASH  +OPT DELETE",
-                    "CMD+1..3 PALETTE  CMD+, SETTINGS",
+                    "CLICK CMD TOGGLE  SHIFT RANGE  DRAG MOVE",
+                    "CMD+[ ] HISTORY  CMD+1..3  CMD+, SETTINGS",
                 ];
                 let (fr, _) = ui.allocate_exact_size(
                     vec2(ui.available_width(), lh * hints.len() as f32),
@@ -2071,6 +2247,27 @@ impl Explorer {
                     );
                 }
             });
+    }
+
+    /// `COPY / CUT / PASTE` row of the inspector (same as Cmd+C / X / V). Paste is enabled
+    /// while the clipboard holds something and targets the current directory.
+    fn ui_clipboard_buttons(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let ts = type_scale(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let bsz = vec2(72.0, ts.row);
+            let has_sel = !self.selected.is_empty();
+            if widgets::button(ui, bsz, "COPY", has_sel).clicked() && has_sel {
+                actions.push(Action::Copy);
+            }
+            if widgets::button(ui, bsz, "CUT", has_sel).clicked() && has_sel {
+                actions.push(Action::Cut);
+            }
+            let can_paste = self.clipboard.is_some();
+            if widgets::button(ui, bsz, "PASTE", can_paste).clicked() && can_paste {
+                actions.push(Action::Paste(None));
+            }
+        });
     }
 
     /// Inspector when several rows are selected: aggregate stats and bulk actions.
@@ -2119,7 +2316,7 @@ impl Explorer {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    if widgets::button(ui, vec2(80.0, ts.row), "COPY", true).clicked() {
+                    if widgets::button(ui, vec2(80.0, ts.row), "PATHS", true).clicked() {
                         actions.push(Action::CopyPaths(
                             items.iter().map(|e| e.path.clone()).collect(),
                         ));
@@ -2135,6 +2332,8 @@ impl Explorer {
                         actions.push(Action::OpenDelete(true));
                     }
                 });
+                ui.add_space(6.0);
+                self.ui_clipboard_buttons(ui, actions);
                 ui.add_space(8.0);
                 let (fr, _) = ui.allocate_exact_size(
                     vec2(ui.available_width(), ts.small + 5.0),

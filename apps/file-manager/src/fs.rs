@@ -283,7 +283,7 @@ pub fn volumes() -> Vec<(String, PathBuf)> {
 }
 
 // ---------------------------------------------------------------------------
-// Mutating operations (rename / trash / delete)
+// Mutating operations (rename / move / copy / trash / delete)
 
 /// Rename `path` in place. Rejects empty names, path separators and existing targets.
 pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
@@ -333,6 +333,59 @@ pub fn move_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Where each of `paths` lands when pasted (copied) into `dest_dir`. Names that are taken —
+/// by an existing entry or by an earlier item of the same paste — get a Finder-style suffix:
+/// `name copy.ext`, `name copy 2.ext`, ... Directories are never pasted into themselves;
+/// those entries (and roots) are dropped.
+pub fn paste_targets(dest_dir: &Path, paths: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    let mut taken: Vec<PathBuf> = Vec::new();
+    let mut out = Vec::new();
+    for src in paths {
+        let Some(name) = src.file_name() else {
+            continue;
+        };
+        if dest_dir.starts_with(src) {
+            continue;
+        }
+        let name = name.to_string_lossy();
+        let (stem, ext) = match name.rsplit_once('.') {
+            // `.hidden` has no extension; `archive.tar.gz` -> (`archive.tar`, `gz`) like the Finder
+            Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+            _ => (name.to_string(), String::new()),
+        };
+        let mut n = 0;
+        let target = loop {
+            let candidate = match n {
+                0 => dest_dir.join(&*name),
+                1 => dest_dir.join(format!("{stem} copy{ext}")),
+                k => dest_dir.join(format!("{stem} copy {k}{ext}")),
+            };
+            let exists = candidate.exists() || std::fs::symlink_metadata(&candidate).is_ok();
+            if !exists && !taken.contains(&candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        taken.push(target.clone());
+        out.push((src.clone(), target));
+    }
+    out
+}
+
+/// Copy `src` (file, directory tree or symlink) to the new path `dst`. Refuses to overwrite.
+pub fn copy_to(src: &Path, dst: &Path) -> Result<(), String> {
+    if dst.exists() || std::fs::symlink_metadata(dst).is_ok() {
+        return Err(format!(
+            "'{}' already exists",
+            dst.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+    if dst.starts_with(src) {
+        return Err("cannot copy a directory into itself".into());
+    }
+    copy_recursive(src, dst).map_err(|e| e.to_string())
 }
 
 /// Copy a tree preserving symlinks (as links, never followed).
@@ -486,6 +539,57 @@ mod tests {
         std::fs::write(deep.join("k.txt"), "k").unwrap();
         move_into(&deep, &sub).unwrap();
         assert!(sub.join("deep/k.txt").exists() && !deep.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paste_targets_use_finder_style_copy_suffixes() {
+        let dir = scratch("paste-targets");
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "x").unwrap();
+        std::fs::write(dir.join("a copy.txt"), "x").unwrap();
+        std::fs::write(dir.join("notes.tar.gz"), "").unwrap();
+        std::fs::write(dir.join(".env"), "").unwrap();
+        let sub = dir.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("a.txt"), "y").unwrap();
+
+        // no collision: keeps the name
+        let t = paste_targets(&sub, &[dir.join("b.txt")]);
+        assert_eq!(t, vec![(dir.join("b.txt"), sub.join("b.txt"))]);
+
+        // same directory (and an existing `a copy.txt`): skips to `a copy 2.txt`; two sources
+        // with the same name do not collide with each other
+        let t = paste_targets(&dir, &[a.clone(), sub.join("a.txt")]);
+        assert_eq!(t[0].1, dir.join("a copy 2.txt"));
+        assert_eq!(t[1].1, dir.join("a copy 3.txt"));
+
+        // only the last extension is kept after the suffix; dotfiles have none
+        let t = paste_targets(&dir, &[dir.join("notes.tar.gz"), dir.join(".env")]);
+        assert_eq!(t[0].1, dir.join("notes.tar copy.gz"));
+        assert_eq!(t[1].1, dir.join(".env copy"));
+
+        // a directory is never pasted into itself (or a descendant); the root is dropped
+        assert!(paste_targets(&sub, &[sub.clone(), PathBuf::from("/")]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_to_duplicates_and_refuses_to_overwrite() {
+        let dir = scratch("copy-to");
+        let a = dir.join("a.txt");
+        std::fs::write(&a, "x").unwrap();
+        copy_to(&a, &dir.join("a copy.txt")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a copy.txt")).unwrap(),
+            "x"
+        );
+        assert!(a.exists(), "source is untouched");
+        assert!(
+            copy_to(&a, &dir.join("a copy.txt")).is_err(),
+            "no overwrite"
+        );
+        assert!(copy_to(&dir, &dir.join("inner")).is_err(), "no self-copy");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
