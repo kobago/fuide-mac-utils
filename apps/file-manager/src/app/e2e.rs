@@ -15,7 +15,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use fuide::palette;
 
-use super::tests::fixture;
+use super::tests::{fixture, goto_state};
 use super::*;
 
 fn harness(root: &Path) -> Harness<'static, Explorer> {
@@ -369,4 +369,38 @@ fn cmd_c_and_cmd_v_duplicate_a_row_and_cmd_x_moves_it() {
     assert_eq!(names(&h), ["A.md", "inner.txt"]);
     assert!(!fx.root.join("A.md").exists());
     assert!(h.state().clipboard.is_none());
+}
+
+#[test]
+fn cmd_shift_g_opens_the_go_to_dialog_tab_completes_and_enter_navigates() {
+    let fx = fixture("e2e-goto");
+    let mut h = harness(&fx.root);
+
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::G);
+    h.run_steps(3);
+    let prefilled = format!("{}/", fx.root.display());
+    assert_eq!(*goto_state(h.state_mut()).0, prefilled);
+
+    // the field has focus with the cursor at the end: typing appends, Tab completes `do` -> `docs/`
+    h.event(egui::Event::Text("do".into()));
+    h.run_steps(2);
+    h.key_press(Key::Tab);
+    h.run_steps(3);
+    assert_eq!(*goto_state(h.state_mut()).0, format!("{prefilled}docs/"));
+
+    h.key_press(Key::Enter);
+    settle(&mut h);
+    assert_eq!(h.state().cwd, fx.root.join("docs"));
+    h.run_steps(20); // dialog fade-out
+    assert!(h.state().dialog.is_none());
+    h.get_by_label("inner.txt");
+
+    // clicking the current breadcrumb also opens it; Escape closes without moving
+    h.get_by_label("DOCS (go to path)").click();
+    h.run_steps(3);
+    assert!(h.state().dialog.is_some());
+    h.key_press(Key::Escape);
+    h.run_steps(20);
+    assert!(h.state().dialog.is_none());
+    assert_eq!(h.state().cwd, fx.root.join("docs"));
 }

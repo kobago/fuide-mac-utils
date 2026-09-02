@@ -65,6 +65,15 @@ enum DialogState {
         indices: Vec<usize>,
         permanent: bool,
     },
+    /// Finder's "Go to Folder": a typed path (`~`, relative, `..` allowed), Tab completes.
+    GoTo {
+        path: String,
+        error: Option<String>,
+        focus: bool,
+        /// Directory completions for `path` (recomputed when it changes).
+        suggestions: Vec<String>,
+        suggested_for: String,
+    },
     /// Big `ERROR` card; details live in the event log.
     Error { line: String },
 }
@@ -106,6 +115,11 @@ enum Action {
     OpenDelete(bool),
     ConfirmRename,
     ConfirmDelete,
+    /// Cmd+Shift+G / click on the current breadcrumb: the go-to-path dialog.
+    OpenGoTo,
+    ConfirmGoTo,
+    /// Tab in the go-to dialog: fill in the single match or the common prefix.
+    CompleteGoTo,
     CloseDialog,
     Navigate(PathBuf),
     Back,
@@ -188,7 +202,7 @@ pub struct Explorer {
     ops: OpChannel,
     /// After a reload, select the entry with this name (used after rename).
     select_after_load: Option<String>,
-    /// Dev aid: `FUIDE_DEV_DIALOG=rename|trash|delete` opens that dialog on the first entry after load.
+    /// Dev aid: `FUIDE_DEV_DIALOG=rename|trash|delete|error|goto` opens that dialog on the first entry after load.
     dev_dialog: Option<String>,
     /// Dev aid: `FUIDE_DEV_SELECT=<n>` selects the first n rows after load (screenshots).
     dev_select: Option<usize>,
@@ -404,6 +418,30 @@ impl Explorer {
                         .as_deref()
                         .map(|e| format!(" :: {e}"))
                         .unwrap_or_default()
+                );
+            }
+            Some(OpenDialog {
+                state:
+                    DialogState::GoTo {
+                        path,
+                        error,
+                        suggestions,
+                        ..
+                    },
+                ..
+            }) => {
+                let _ = writeln!(
+                    s,
+                    "dialog: GO TO :: path {path:?}{}{} :: buttons CANCEL / GO (tab completes)",
+                    error
+                        .as_deref()
+                        .map(|e| format!(" :: {e}"))
+                        .unwrap_or_default(),
+                    if suggestions.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" :: completions {}", suggestions.join(", "))
+                    }
                 );
             }
             Some(OpenDialog {
@@ -709,6 +747,71 @@ impl Explorer {
                         self.load(ctx, self.cwd.clone());
                     }
                     Err(e) => *error = Some(e),
+                }
+            }
+            Action::OpenGoTo => {
+                let mut path = self.cwd.display().to_string();
+                if !path.ends_with('/') {
+                    path.push('/');
+                }
+                self.dialog = Some(OpenDialog {
+                    state: DialogState::GoTo {
+                        path,
+                        error: None,
+                        focus: true,
+                        suggestions: Vec::new(),
+                        suggested_for: String::new(),
+                    },
+                    closing: false,
+                });
+            }
+            Action::ConfirmGoTo => {
+                let Some(OpenDialog {
+                    state: DialogState::GoTo { path, error, .. },
+                    closing: false,
+                }) = &mut self.dialog
+                else {
+                    return;
+                };
+                match fs::resolve_goto(path, &self.cwd) {
+                    Ok((dir, select)) => {
+                        if let Some(d) = &mut self.dialog {
+                            d.closing = true;
+                        }
+                        self.push_log(t, format!("goto // {}", dir.display()), Level::Info);
+                        self.navigate(ctx, dir, t);
+                        if select.is_some() {
+                            self.select_after_load = select;
+                            // same directory: `navigate` did not reload, select right away
+                            if self.pending.is_none() {
+                                let name = self.select_after_load.take().unwrap_or_default();
+                                let idx = self.entries.iter().position(|e| e.name == name);
+                                self.select_one(idx);
+                                self.scroll_to_selected = true;
+                            }
+                        }
+                    }
+                    Err(e) => *error = Some(e),
+                }
+            }
+            Action::CompleteGoTo => {
+                let Some(OpenDialog {
+                    state:
+                        DialogState::GoTo {
+                            path, suggestions, ..
+                        },
+                    closing: false,
+                }) = &mut self.dialog
+                else {
+                    return;
+                };
+                let filled = match suggestions.len() {
+                    0 => return,
+                    1 => suggestions[0].clone(),
+                    _ => fs::common_prefix(suggestions),
+                };
+                if filled.len() > path.len() {
+                    *path = filled;
                 }
             }
             Action::ConfirmDelete => {
@@ -1091,6 +1194,9 @@ impl Explorer {
                     actions.push(Action::OpenRename(s));
                 }
             }
+            if cmd && i.modifiers.shift && i.key_pressed(Key::G) {
+                actions.push(Action::OpenGoTo);
+            }
             if cmd && i.key_pressed(Key::OpenBracket) {
                 actions.push(Action::Back);
             }
@@ -1161,6 +1267,7 @@ impl eframe::App for Explorer {
             actions.push(Action::Select(Some(first)));
             actions.push(match kind.as_str() {
                 "rename" => Action::OpenRename(first),
+                "goto" => Action::OpenGoTo,
                 "error" => {
                     self.error_queue.push_back("delete // immutable.txt".into());
                     Action::Select(Some(first))
@@ -1644,8 +1751,13 @@ impl Explorer {
             let n = labels.len();
             for (i, label) in labels.iter().enumerate().skip(skip) {
                 let last = i + 1 == n;
-                if crumb(ui, label, last, &pal).clicked() && !last {
-                    actions.push(Action::Navigate(comps[n - 1 - i].clone()));
+                let resp = crumb(ui, label, last, &pal);
+                if resp.clicked() {
+                    actions.push(if last {
+                        Action::OpenGoTo
+                    } else {
+                        Action::Navigate(comps[n - 1 - i].clone())
+                    });
                 }
                 if !last {
                     let (r, _) = ui.allocate_exact_size(vec2(sep_w, 20.0), Sense::hover());
@@ -2230,7 +2342,7 @@ impl Explorer {
                     "CMD+C COPY  CMD+X CUT  CMD+V PASTE",
                     "CMD+R RENAME  CMD+BKSP TRASH  +OPT DELETE",
                     "CLICK CMD TOGGLE  SHIFT RANGE  DRAG MOVE",
-                    "CMD+[ ] HISTORY  CMD+1..3  CMD+, SETTINGS",
+                    "CMD+SHIFT+G GO TO PATH  CMD+[ ] HISTORY",
                 ];
                 let (fr, _) = ui.allocate_exact_size(
                     vec2(ui.available_width(), lh * hints.len() as f32),
@@ -2358,6 +2470,7 @@ impl Explorer {
         };
         let open = !*closing;
         let enter = open && ctx.input(|i| i.key_pressed(Key::Enter));
+        let tab = open && ctx.input(|i| i.key_pressed(Key::Tab));
         let finished;
         match state {
             DialogState::Rename {
@@ -2411,6 +2524,97 @@ impl Explorer {
                     actions.push(Action::CloseDialog);
                 } else if submit || clicked == Some(1) {
                     actions.push(Action::ConfirmRename);
+                }
+            }
+            DialogState::GoTo {
+                path,
+                error,
+                focus,
+                suggestions,
+                suggested_for,
+            } => {
+                if *suggested_for != *path {
+                    *suggestions = fs::complete_goto(path, &self.cwd, 6);
+                    *suggested_for = path.clone();
+                }
+                let resp = Dialog::new("Go to")
+                    .tag("path", pal.text_dim)
+                    .width(560.0)
+                    .show(ctx, open, |ui| {
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        let input =
+                            widgets::text_input(ui, ui.available_width(), path, "go to path");
+                        if *focus {
+                            // cursor at the end: the field opens with the current directory and
+                            // a trailing `/`, and a completion is appended to
+                            input.request_focus();
+                            let mut st =
+                                egui::TextEdit::load_state(ui.ctx(), input.id).unwrap_or_default();
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                egui::text::CCursor::new(path.chars().count()),
+                            )));
+                            st.store(ui.ctx(), input.id);
+                            *focus = false;
+                        }
+                        let submit = input.lost_focus() && enter;
+                        // egui moves focus away on Tab before widgets run, so the field reports
+                        // `lost_focus`; complete and take the focus back
+                        let complete = tab && (input.has_focus() || input.lost_focus());
+                        if complete {
+                            *focus = true;
+                        }
+                        // completions: names only, one line, dim
+                        let names: Vec<String> = suggestions
+                            .iter()
+                            .map(|s| {
+                                s.trim_end_matches('/')
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or(s)
+                                    .to_string()
+                            })
+                            .collect();
+                        let (lr, _) = ui.allocate_exact_size(
+                            vec2(ui.available_width(), ts.label + 6.0),
+                            Sense::hover(),
+                        );
+                        let (text, color) = match error {
+                            Some(e) => (format!("REJECTED :: {}", e.to_uppercase()), pal.danger),
+                            None if names.is_empty() => (
+                                "~ AND RELATIVE PATHS OK :: TAB COMPLETES".to_string(),
+                                pal.text_dim,
+                            ),
+                            None => (format!("TAB :: {}", names.join("  ")), pal.text_dim),
+                        };
+                        ui.painter()
+                            .with_clip_rect(lr.intersect(ui.clip_rect()))
+                            .text(
+                                pos2(lr.left(), lr.center().y),
+                                Align2::LEFT_CENTER,
+                                text,
+                                mono(ts.label),
+                                color,
+                            );
+                        ui.add_space(8.0);
+                        let clicked = fuide::dialog::button_row(
+                            ui,
+                            &[
+                                ("CANCEL", pal.text_dim, true),
+                                ("GO", pal.accent, !path.trim().is_empty()),
+                            ],
+                        );
+                        (submit, complete, clicked)
+                    });
+                finished = resp.finished;
+                let (submit, complete, clicked) = resp.inner.unwrap_or((false, false, None));
+                if !open {
+                    // fading out: ignore input
+                } else if resp.should_close || clicked == Some(0) {
+                    actions.push(Action::CloseDialog);
+                } else if submit || clicked == Some(1) {
+                    actions.push(Action::ConfirmGoTo);
+                } else if complete {
+                    actions.push(Action::CompleteGoTo);
                 }
             }
             DialogState::Delete { indices, permanent } => {
@@ -2591,12 +2795,24 @@ impl Explorer {
 }
 
 /// One breadcrumb segment. The last one is the current directory (accent, not clickable).
+/// Breadcrumb segment. Ancestors navigate; the last one (the current directory) opens the
+/// go-to-path dialog.
 fn crumb(ui: &mut Ui, label: &str, last: bool, pal: &Palette) -> egui::Response {
     let size = type_scale(ui.ctx()).heading;
     let galley = fuide::display_galley(ui.painter(), label, size, pal.text);
     let size = galley.size() + vec2(8.0, 6.0);
-    let (rect, resp) =
-        ui.allocate_exact_size(size, if last { Sense::hover() } else { Sense::click() });
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    fuide::agent::describe(&resp, || {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            if last {
+                format!("{label} (go to path)")
+            } else {
+                label.to_string()
+            },
+        )
+    });
     let color = if last {
         pal.accent
     } else if resp.hovered() {
@@ -2604,7 +2820,7 @@ fn crumb(ui: &mut Ui, label: &str, last: bool, pal: &Palette) -> egui::Response 
     } else {
         pal.text.gamma_multiply(0.7)
     };
-    if resp.hovered() && !last {
+    if resp.hovered() {
         ui.painter().rect_filled(
             rect,
             egui::CornerRadius::ZERO,

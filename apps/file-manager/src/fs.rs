@@ -283,6 +283,113 @@ pub fn volumes() -> Vec<(String, PathBuf)> {
 }
 
 // ---------------------------------------------------------------------------
+// Go to path (typed navigation)
+
+/// Expand `~` and make `input` absolute against `cwd`, then drop `.` / `..` lexically (no
+/// symlink resolution — the path is shown as typed).
+fn expand(input: &str, cwd: &Path) -> PathBuf {
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    let raw = if input == "~" {
+        home().unwrap_or_else(|| PathBuf::from("/"))
+    } else if let Some(rest) = input.strip_prefix("~/") {
+        home().unwrap_or_else(|| PathBuf::from("/")).join(rest)
+    } else if input.starts_with('/') {
+        PathBuf::from(input)
+    } else {
+        cwd.join(input)
+    };
+    let mut out = PathBuf::new();
+    for c in raw.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push("/");
+    }
+    out
+}
+
+/// Where a typed path leads: the directory to show, plus the file to select when the path
+/// names a file (Finder's "Go to Folder" does the same). `~`, relative paths and `..` work.
+pub fn resolve_goto(input: &str, cwd: &Path) -> Result<(PathBuf, Option<String>), String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("path is empty".into());
+    }
+    let path = expand(input, cwd);
+    let meta = std::fs::metadata(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => "no such path".to_string(),
+        _ => e.to_string(),
+    })?;
+    if meta.is_dir() {
+        return Ok((path, None));
+    }
+    let name = path.file_name().map(|s| s.to_string_lossy().into_owned());
+    let parent = path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "no parent directory".to_string())?;
+    Ok((parent, name))
+}
+
+/// Completions for a partially typed path: the directories in the parent of the last
+/// component whose name starts with it (case-insensitive), each returned as the full input
+/// to substitute (the typed prefix style — `~/`, relative — is kept) with a trailing `/`.
+/// Hidden directories only appear once the component starts with `.`. Sorted, at most `max`.
+pub fn complete_goto(input: &str, cwd: &Path, max: usize) -> Vec<String> {
+    let (head, part) = match input.rfind('/') {
+        Some(i) => (&input[..=i], &input[i + 1..]),
+        None => ("", input),
+    };
+    if head.is_empty() && (part == "~" || part.is_empty()) {
+        return Vec::new();
+    }
+    let dir = if head.is_empty() {
+        cwd.to_path_buf()
+    } else {
+        expand(head, cwd)
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let want = part.to_lowercase();
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.to_lowercase().starts_with(&want))
+        .filter(|n| !n.starts_with('.') || part.starts_with('.'))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.truncate(max);
+    names.into_iter().map(|n| format!("{head}{n}/")).collect()
+}
+
+/// Longest common prefix of the candidates (what Tab fills in when several match).
+pub fn common_prefix(items: &[String]) -> String {
+    let Some(first) = items.first() else {
+        return String::new();
+    };
+    let mut end = first.len();
+    for other in &items[1..] {
+        end = first
+            .char_indices()
+            .zip(other.chars())
+            .take_while(|((_, a), b)| a == b)
+            .last()
+            .map(|((i, a), _)| i + a.len_utf8())
+            .unwrap_or(0)
+            .min(end);
+    }
+    first[..end].to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Mutating operations (rename / move / copy / trash / delete)
 
 /// Rename `path` in place. Rejects empty names, path separators and existing targets.
@@ -539,6 +646,71 @@ mod tests {
         std::fs::write(deep.join("k.txt"), "k").unwrap();
         move_into(&deep, &sub).unwrap();
         assert!(sub.join("deep/k.txt").exists() && !deep.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_goto_expands_tilde_relative_paths_and_files() {
+        let dir = scratch("goto");
+        std::fs::create_dir_all(dir.join("docs/inner")).unwrap();
+        std::fs::write(dir.join("docs/a.txt"), "a").unwrap();
+
+        assert_eq!(
+            resolve_goto("docs", &dir).unwrap(),
+            (dir.join("docs"), None)
+        );
+        assert_eq!(
+            resolve_goto("  docs/inner/../inner/ ", &dir).unwrap(),
+            (dir.join("docs/inner"), None)
+        );
+        assert_eq!(
+            resolve_goto(&dir.join("docs/a.txt").display().to_string(), &dir).unwrap(),
+            (dir.join("docs"), Some("a.txt".into())),
+            "a file selects itself in its parent"
+        );
+        assert_eq!(resolve_goto("..", &dir.join("docs")).unwrap().0, dir);
+        assert_eq!(resolve_goto("/", &dir).unwrap().0, PathBuf::from("/"));
+        assert_eq!(resolve_goto("/..", &dir).unwrap().0, PathBuf::from("/"));
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        assert_eq!(resolve_goto("~", &dir).unwrap().0, home);
+        assert_eq!(resolve_goto("~/", &dir).unwrap().0, home);
+        assert_eq!(resolve_goto("", &dir).unwrap_err(), "path is empty");
+        assert_eq!(resolve_goto("docs/nope", &dir).unwrap_err(), "no such path");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn complete_goto_lists_matching_directories_keeping_the_typed_prefix() {
+        let dir = scratch("complete");
+        for d in ["Documents", "Downloads", "Desktop", ".config", "Music"] {
+            std::fs::create_dir(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("Do.txt"), "").unwrap();
+        let abs = dir.display().to_string();
+
+        // relative to cwd, case-insensitive, directories only, sorted
+        assert_eq!(complete_goto("do", &dir, 10), ["Documents/", "Downloads/"]);
+        // typed prefix style is kept
+        assert_eq!(
+            complete_goto(&format!("{abs}/De"), &dir, 10),
+            [format!("{abs}/Desktop/")]
+        );
+        // hidden entries only when asked for; the whole directory when the component is empty
+        assert_eq!(complete_goto(&format!("{abs}/"), &dir, 10).len(), 4);
+        assert_eq!(
+            complete_goto(&format!("{abs}/.c"), &dir, 10),
+            [format!("{abs}/.config/")]
+        );
+        assert_eq!(complete_goto("", &dir, 10), Vec::<String>::new());
+        assert_eq!(complete_goto("x/y/z", &dir, 10), Vec::<String>::new());
+        assert_eq!(complete_goto("do", &dir, 1).len(), 1, "max applies");
+
+        assert_eq!(
+            common_prefix(&["Documents/".into(), "Downloads/".into()]),
+            "Do"
+        );
+        assert_eq!(common_prefix(&["a/".into()]), "a/");
+        assert_eq!(common_prefix(&[]), "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

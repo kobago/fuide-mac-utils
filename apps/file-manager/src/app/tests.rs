@@ -496,3 +496,80 @@ fn cmd_c_writes_the_paths_as_text_and_a_foreign_paste_supersedes_the_files() {
     assert!(!fx.root.join("b copy 2.txt").exists());
     assert!(log_has(&app, "paste // clipboard was replaced elsewhere"));
 }
+
+pub(super) fn goto_state(
+    app: &mut Explorer,
+) -> (&mut String, &mut Option<String>, &mut Vec<String>) {
+    match &mut app.dialog {
+        Some(OpenDialog {
+            state:
+                DialogState::GoTo {
+                    path,
+                    error,
+                    suggestions,
+                    ..
+                },
+            ..
+        }) => (path, error, suggestions),
+        _ => panic!("go-to dialog is not open"),
+    }
+}
+
+#[test]
+fn go_to_dialog_navigates_to_typed_paths_selects_files_and_completes() {
+    let fx = fixture("goto");
+    let (ctx, mut app) = app(&fx.root);
+
+    // opens prefilled with the current directory and a trailing slash
+    app.apply(&ctx, Action::OpenGoTo, 0.0);
+    assert_eq!(*goto_state(&mut app).0, format!("{}/", fx.root.display()));
+
+    // a relative directory
+    *goto_state(&mut app).0 = "docs".into();
+    app.apply(&ctx, Action::ConfirmGoTo, 0.0);
+    settle(&ctx, &mut app);
+    assert_eq!(app.cwd, fx.root.join("docs"));
+    assert!(app.dialog.as_ref().is_some_and(|d| d.closing));
+    assert!(log_has(&app, "goto // "));
+    app.dialog = None;
+
+    // a file: stay in its directory and select it (no reload happens, so immediately)
+    app.apply(&ctx, Action::OpenGoTo, 0.0);
+    *goto_state(&mut app).0 = "inner.txt".into();
+    app.apply(&ctx, Action::ConfirmGoTo, 0.0);
+    settle(&ctx, &mut app);
+    assert_eq!(app.cwd, fx.root.join("docs"));
+    assert_eq!(app.lead, Some(idx_of(&app, "inner.txt")));
+    app.dialog = None;
+
+    // a file elsewhere: navigate to its parent, then select it after the load
+    app.apply(&ctx, Action::OpenGoTo, 0.0);
+    *goto_state(&mut app).0 = "../b.txt".into();
+    app.apply(&ctx, Action::ConfirmGoTo, 0.0);
+    settle(&ctx, &mut app);
+    assert_eq!(app.cwd, fx.root);
+    assert_eq!(app.lead, Some(idx_of(&app, "b.txt")));
+    assert_eq!(app.history.len(), 3, "typed navigation is in the history");
+    app.dialog = None;
+
+    // a missing path is rejected in place
+    app.apply(&ctx, Action::OpenGoTo, 0.0);
+    *goto_state(&mut app).0 = "nowhere".into();
+    app.apply(&ctx, Action::ConfirmGoTo, 0.0);
+    assert!(app.dialog.as_ref().is_some_and(|d| !d.closing));
+    assert_eq!(goto_state(&mut app).1.as_deref(), Some("no such path"));
+    assert_eq!(app.cwd, fx.root);
+
+    // Tab: a single completion is taken whole, several give their common prefix
+    // (the suggestions themselves are computed by the dialog UI each frame)
+    let (path, _, suggestions) = goto_state(&mut app);
+    *path = "Mu".into();
+    *suggestions = fs::complete_goto("Mu", &fx.root, 6);
+    app.apply(&ctx, Action::CompleteGoTo, 0.0);
+    assert_eq!(*goto_state(&mut app).0, "Music/");
+    let (path, _, suggestions) = goto_state(&mut app);
+    *path = "d".into();
+    *suggestions = vec!["docs/".into(), "documents/".into()];
+    app.apply(&ctx, Action::CompleteGoTo, 0.0);
+    assert_eq!(*goto_state(&mut app).0, "doc");
+}
