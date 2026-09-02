@@ -18,6 +18,8 @@ const TOOLBAR_H: f32 = 32.0;
 /// Default log panel height; the divider above it is draggable (`Settings::log_height`).
 const LOG_H: f32 = 110.0;
 const LOG_MIN: f32 = 60.0;
+/// Header strip left when the log panel is collapsed (`Settings::log_open` = false).
+const LOG_CLOSED: f32 = 26.0;
 /// Space kept for the panels above the log when the divider is dragged up.
 const BODY_MIN: f32 = 300.0;
 const STORAGE_H: f32 = 152.0;
@@ -328,7 +330,11 @@ impl Explorer {
             }
             None => {}
         }
-        s.push_str("log (latest last):\n");
+        if self.settings.log_open {
+            s.push_str("log (latest last):\n");
+        } else {
+            s.push_str("log (panel collapsed; latest last):\n");
+        }
         let skip = self.log.len().saturating_sub(6);
         for e in &self.log[skip..] {
             let _ = writeln!(s, "  {} {}", e.time, e.text);
@@ -816,13 +822,16 @@ impl eframe::App for Explorer {
             shell = shell.lamp(text, if busy { pal.warn } else { pal.accent }, busy);
         }
 
+        let log_open = self.settings.log_open;
         let mut log_resized = false;
+        let mut log_toggled = false;
         let out = shell.show_full(ui, |ui| {
             let c = ui.max_rect();
             let top = c.top() + 10.0; // room for title chips above the first panels
             let log_max = c.height() - BODY_MIN;
             self.log_h = self.log_h.clamp(LOG_MIN, log_max.max(LOG_MIN));
-            let log_rect = Rect::from_min_max(pos2(c.left(), c.bottom() - self.log_h), c.max);
+            let log_h = if log_open { self.log_h } else { LOG_CLOSED };
+            let log_rect = Rect::from_min_max(pos2(c.left(), c.bottom() - log_h), c.max);
             let body_bottom = log_rect.top() - GAP - 8.0;
 
             let left =
@@ -849,20 +858,25 @@ impl eframe::App for Explorer {
             self.ui_toolbar(ui, toolbar, &mut actions);
             self.ui_listing(ui, listing, &mut actions);
             self.ui_inspector(ui, right, &mut actions);
-            self.ui_log(ui, log_rect, t);
-            // draggable divider in the gap above the log panel
-            let strip =
-                Rect::from_min_max(pos2(c.left(), body_bottom), pos2(c.right(), log_rect.top()));
-            let resp = widgets::h_splitter(
-                ui,
-                strip,
-                "log",
-                &mut self.log_h,
-                LOG_MIN,
-                log_max,
-                "LOG HEIGHT",
-            );
-            log_resized = resp.drag_stopped();
+            if log_open {
+                // draggable divider in the gap above the log panel; registered before the
+                // panel so its title chip (which straddles the strip's bottom edge) wins clicks
+                let strip = Rect::from_min_max(
+                    pos2(c.left(), body_bottom),
+                    pos2(c.right(), log_rect.top()),
+                );
+                let resp = widgets::h_splitter(
+                    ui,
+                    strip,
+                    "log",
+                    &mut self.log_h,
+                    LOG_MIN,
+                    log_max,
+                    "LOG HEIGHT",
+                );
+                log_resized = resp.drag_stopped();
+            }
+            log_toggled = self.ui_log(ui, log_rect, t, log_open);
         });
         self.agent.paint(&ctx);
         if out.settings_clicked {
@@ -870,6 +884,10 @@ impl eframe::App for Explorer {
         }
         if log_resized {
             self.settings.log_height = Some(self.log_h.round());
+            self.save_settings(t);
+        }
+        if log_toggled {
+            self.settings.log_open = !log_open;
             self.save_settings(t);
         }
 
@@ -1728,12 +1746,16 @@ impl Explorer {
         }
     }
 
-    fn ui_log(&self, ui: &mut Ui, rect: Rect, _t: f64) {
+    /// Returns `true` when the title chip was clicked (the caller flips `Settings::log_open`).
+    fn ui_log(&self, ui: &mut Ui, rect: Rect, _t: f64, open: bool) -> bool {
         let pal = palette(ui.ctx());
-        Panel::new("Event log")
+        let (_, toggled) = Panel::new("Event log")
             .tag(format!("{} events", self.log.len()), pal.text_dim)
             .padding(8.0, 12.0)
-            .show_rect(ui, rect, |ui| {
+            .show_collapsible_rect(ui, rect, open, |ui| {
+                if !open {
+                    return; // just the header strip
+                }
                 // resolve placeholder colours against the live palette
                 let lines: Vec<LogLine> = self
                     .log
@@ -1757,6 +1779,7 @@ impl Explorer {
                     widgets::LogOrder::NewestFirst,
                 );
             });
+        toggled
     }
 }
 

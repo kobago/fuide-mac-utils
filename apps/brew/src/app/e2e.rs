@@ -199,6 +199,31 @@ fn cmd_comma_opens_settings_and_a_palette_click_is_saved() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn clicking_the_log_title_chip_collapses_the_panel_and_saves() {
+    let mut h = harness();
+    let dir =
+        std::env::temp_dir().join(format!("fuide-brew-e2e-log-toggle-{}", std::process::id()));
+    let conf: PathBuf = dir.join("brew.conf");
+    h.state_mut().persist_settings_to(conf.clone());
+    h.get_by_label("LOG HEIGHT"); // divider is live while open
+
+    h.get_by_label("BREW OUTPUT").click();
+    h.run_steps(2);
+    assert!(!h.state().settings.log_open);
+    assert!(!Settings::load_from(&conf).unwrap().log_open);
+    assert!(
+        h.query_by_label("LOG HEIGHT").is_none(),
+        "no divider while collapsed"
+    );
+
+    h.get_by_label("BREW OUTPUT").click();
+    h.run_steps(2);
+    assert!(h.state().settings.log_open);
+    assert!(Settings::load_from(&conf).unwrap().log_open);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------------------- agent
 
 /// Queue an agent command and step frames until it answers (the cursor glide, the injected

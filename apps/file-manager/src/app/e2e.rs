@@ -165,6 +165,35 @@ fn dragging_the_log_divider_resizes_the_log_panel_and_saves_the_height() {
 }
 
 #[test]
+fn clicking_the_log_title_chip_collapses_the_panel_and_saves() {
+    let fx = fixture("e2e-log-toggle");
+    let mut h = harness(&fx.root);
+    let conf: PathBuf = fx.root.join("cfg").join("file-manager.conf");
+    h.state_mut().persist_settings_to(conf.clone());
+    assert!(h.state().settings.log_open);
+    h.get_by_label("LOG HEIGHT"); // divider is live while open
+
+    h.get_by_label("EVENT LOG").click();
+    h.run_steps(2);
+    assert!(!h.state().settings.log_open);
+    assert!(!Settings::load_from(&conf).unwrap().log_open);
+    assert_eq!(
+        h.get_by_label("EVENT LOG").accesskit_node().toggled(),
+        Some(Toggled::False)
+    );
+    assert!(
+        h.query_by_label("LOG HEIGHT").is_none(),
+        "no divider while collapsed"
+    );
+
+    h.get_by_label("EVENT LOG").click();
+    h.run_steps(2);
+    assert!(h.state().settings.log_open);
+    assert!(Settings::load_from(&conf).unwrap().log_open);
+    h.get_by_label("LOG HEIGHT");
+}
+
+#[test]
 fn the_gear_opens_settings_and_a_palette_click_restyles_and_saves() {
     let fx = fixture("e2e-settings");
     let mut h = harness(&fx.root);
