@@ -4,6 +4,10 @@ mod app;
 mod brew;
 
 fn main() -> eframe::Result {
+    // `fuide-brew --mcp`: stdio MCP bridge to the running app (see `fuide::agent::bridge`)
+    if std::env::args().nth(1).as_deref() == Some("--mcp") {
+        std::process::exit(fuide::agent::bridge::run("brew", "FUIDE Brew"));
+    }
     fuide::devshot::install_trace_logger();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

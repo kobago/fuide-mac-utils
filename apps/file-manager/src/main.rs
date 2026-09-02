@@ -4,6 +4,13 @@ mod app;
 mod fs;
 
 fn main() -> eframe::Result {
+    // `fuide-file-manager --mcp`: stdio MCP bridge to the running app (see `fuide::agent::bridge`)
+    if std::env::args().nth(1).as_deref() == Some("--mcp") {
+        std::process::exit(fuide::agent::bridge::run(
+            "file-manager",
+            "FUIDE File Manager",
+        ));
+    }
     fuide::devshot::install_trace_logger();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

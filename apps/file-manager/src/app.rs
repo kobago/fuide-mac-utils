@@ -130,6 +130,8 @@ pub struct Explorer {
     dev_close_frame: Option<u32>,
     dev_frame: u32,
     devshot: fuide::devshot::DevShot,
+    /// MCP interface for AI agents (`fuide::agent`); on/off in the settings window.
+    agent: fuide::Agent,
 }
 
 impl Explorer {
@@ -196,8 +198,17 @@ impl Explorer {
                 .and_then(|v| v.parse().ok()),
             dev_frame: 0,
             devshot: fuide::devshot::DevShot::from_env(),
+            agent: fuide::Agent::new(APP_ID, "FUIDE File Manager"),
         };
         app.push_log(0.0, "file manager online :: fs link established", Level::Ok);
+        app.agent.set_enabled(ctx, app.settings.agent);
+        if app.settings.agent {
+            app.push_log(
+                0.0,
+                "agent // interface on :: waiting for a client",
+                Level::Warn,
+            );
+        }
         // Dev aid: `FUIDE_DEV_SETTINGS=1` opens the settings window at start (screenshots).
         if std::env::var_os("FUIDE_DEV_SETTINGS").is_some() {
             app.settings_win.open();
@@ -210,6 +221,120 @@ impl Explorer {
     }
 
     // ------------------------------------------------------------------ state
+
+    /// While a delete / trash confirmation is open and the agent may not confirm, its verb is
+    /// human-only (rename is reversible, so it stays open to the agent).
+    fn agent_blocked(&self) -> Vec<String> {
+        match &self.dialog {
+            Some(OpenDialog {
+                state: DialogState::Delete { permanent, .. },
+                closing: false,
+            }) if !self.settings.agent_confirm => vec![if *permanent {
+                "DELETE PERMANENTLY".into()
+            } else {
+                "MOVE TO TRASH".into()
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// State summary for the agent's `observe` (what the widgets alone do not say).
+    fn agent_state(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        let _ = writeln!(s, "cwd: {}", self.cwd.display());
+        let _ = writeln!(
+            s,
+            "entries: {} shown of {} :: hidden files {} :: sort {} {} :: filter {:?}",
+            self.view.len(),
+            self.entries.len(),
+            if self.show_hidden { "shown" } else { "hidden" },
+            match self.sort_key {
+                SortKey::Name => "name",
+                SortKey::Kind => "kind",
+                SortKey::Size => "size",
+                SortKey::Modified => "modified",
+            },
+            if self.sort_desc { "desc" } else { "asc" },
+            self.filter
+        );
+        match self.selected.and_then(|i| self.entries.get(i)) {
+            Some(e) => {
+                let _ = writeln!(
+                    s,
+                    "selected: {} ({}{}) {} bytes",
+                    e.name,
+                    e.kind.tag(),
+                    if e.is_dir { ", directory" } else { "" },
+                    e.size
+                );
+            }
+            None => s.push_str("selected: none\n"),
+        }
+        if self.pending.is_some() {
+            s.push_str("loading: directory read in progress\n");
+        }
+        if self.ops.busy() {
+            s.push_str("file operation: running\n");
+        }
+        if let Some(e) = &self.last_error {
+            let _ = writeln!(s, "last error: {e}");
+        }
+        if self.dialog.as_ref().is_some_and(|d| d.closing) {
+            s.push_str("dialog: closing\n");
+        }
+        match self.dialog.as_ref().filter(|d| !d.closing) {
+            Some(OpenDialog {
+                state: DialogState::Rename { name, error, .. },
+                ..
+            }) => {
+                let _ = writeln!(
+                    s,
+                    "dialog: RENAME :: new name {name:?}{} :: buttons CANCEL / RENAME",
+                    error
+                        .as_deref()
+                        .map(|e| format!(" :: {e}"))
+                        .unwrap_or_default()
+                );
+            }
+            Some(OpenDialog {
+                state: DialogState::Delete { idx, permanent },
+                ..
+            }) => {
+                let _ = writeln!(
+                    s,
+                    "dialog: {} :: {} :: buttons CANCEL / {}",
+                    if *permanent {
+                        "DELETE"
+                    } else {
+                        "MOVE TO TRASH"
+                    },
+                    self.entries
+                        .get(*idx)
+                        .map(|e| e.name.as_str())
+                        .unwrap_or("?"),
+                    if *permanent {
+                        "DELETE PERMANENTLY"
+                    } else {
+                        "MOVE TO TRASH"
+                    }
+                );
+            }
+            Some(OpenDialog {
+                state: DialogState::Error { line },
+                ..
+            }) => {
+                let _ = writeln!(s, "dialog: ERROR :: {line} :: press ACKNOWLEDGE");
+            }
+            None => {}
+        }
+        s.push_str("log (latest last):\n");
+        let skip = self.log.len().saturating_sub(6);
+        for e in &self.log[skip..] {
+            let _ = writeln!(s, "  {} {}", e.time, e.text);
+        }
+        s
+    }
 
     fn push_log(&mut self, t: f64, text: impl Into<String>, level: Level) {
         self.log.push(Event {
@@ -511,10 +636,16 @@ impl Explorer {
         self.push_log(
             t,
             format!(
-                "settings // palette {} :: {} :: {}",
+                "settings // palette {} :: {} :: {} :: agent {}{}",
                 s.palette.name(),
                 if s.chamfer { "chamfer" } else { "square" },
-                if s.compact { "compact" } else { "normal" }
+                if s.compact { "compact" } else { "normal" },
+                if s.agent { "on" } else { "off" },
+                if s.agent && s.agent_confirm {
+                    " (may confirm)"
+                } else {
+                    ""
+                }
             ),
             Level::Warn,
         );
@@ -609,6 +740,11 @@ impl eframe::App for Explorer {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.devshot.tick(ui.ctx());
+        // agent first: injected input must be visible to this frame's widgets
+        self.agent.set_enabled(ui.ctx(), self.settings.agent);
+        self.agent.set_blocked(self.agent_blocked());
+        let agent_state = self.agent.wants_state().then(|| self.agent_state());
+        self.agent.tick(ui.ctx(), agent_state);
         let t = ui.input(|i| i.time);
         let ctx = ui.ctx().clone();
         self.poll_ops(&ctx, t);
@@ -676,6 +812,9 @@ impl eframe::App for Explorer {
         if self.ops.busy() {
             shell = shell.lamp("FS WRITE", pal.warn, true);
         }
+        if let Some((text, busy)) = self.agent.lamp() {
+            shell = shell.lamp(text, if busy { pal.warn } else { pal.accent }, busy);
+        }
 
         let mut log_resized = false;
         let out = shell.show_full(ui, |ui| {
@@ -725,6 +864,7 @@ impl eframe::App for Explorer {
             );
             log_resized = resp.drag_stopped();
         });
+        self.agent.paint(&ctx);
         if out.settings_clicked {
             actions.push(Action::OpenSettings);
         }
@@ -741,6 +881,8 @@ impl eframe::App for Explorer {
             self.rebuild_view();
         }
         // Settings window (child viewport) last: it pauses this viewport while it draws.
+        self.settings_win
+            .set_agent_status(&ctx, &self.agent.status_line());
         if self
             .settings_win
             .show(&ctx, &mut self.settings, "FUIDE File Manager")
@@ -1083,7 +1225,7 @@ impl Explorer {
                             }
                             let is_sel = selected == Some(idx);
                             // rows are addressable by file name (UI tests, assistive tech)
-                            resp.widget_info(|| {
+                            fuide::agent::describe(&resp, || {
                                 egui::WidgetInfo::selected(
                                     egui::WidgetType::SelectableLabel,
                                     true,

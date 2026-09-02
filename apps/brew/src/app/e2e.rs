@@ -10,6 +10,7 @@ use egui::accesskit::{Role, Toggled};
 use egui::{Key, Modifiers, Vec2};
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
+use fuide::agent::{Command, Reply};
 
 use super::tests::use_fake_brew;
 use super::*;
@@ -196,4 +197,129 @@ fn cmd_comma_opens_settings_and_a_palette_click_is_saved() {
         "main shell + settings shell"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------- agent
+
+/// Queue an agent command and step frames until it answers (the cursor glide, the injected
+/// click and the settle take a few dozen frames).
+fn agent(h: &mut Harness<'static, BrewApp>, cmd: Command) -> Reply {
+    let rx = h.state().agent.submit(cmd);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        h.run_steps(1);
+        if let Ok(r) = rx.try_recv() {
+            return r;
+        }
+        assert!(Instant::now() < deadline, "the agent did not answer");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn agent_text(h: &mut Harness<'static, BrewApp>, cmd: Command) -> String {
+    match agent(h, cmd) {
+        Reply::Text(t) => t,
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+fn click(label: &str) -> Command {
+    Command::Click {
+        label: label.into(),
+        nth: 1,
+    }
+}
+
+#[test]
+fn agent_drives_the_views_and_search() {
+    let mut h = harness();
+    h.state_mut().agent.enable_without_server();
+    h.run_steps(2);
+
+    let t = agent_text(&mut h, Command::Observe);
+    assert!(t.contains("view: INSTALLED :: rows: 5"), "{t}");
+    assert!(t.contains("[item] INSTALLED  5 (selected)"), "{t}");
+    assert!(t.contains("[button] UPGRADE ALL  2"), "{t}");
+    assert!(t.contains("[input] FILTER = \"\""), "{t}");
+
+    let t = agent_text(&mut h, click("OUTDATED  3"));
+    pump(&mut h);
+    assert_eq!(row_names(&h), ["cmake", "iterm2", "ripgrep"]);
+    assert!(t.contains("view: OUTDATED"), "{t}");
+    assert_eq!(h.state().agent.last_action(), Some("CLICK ▸ OUTDATED  3"));
+
+    // rows are items; clicking one selects it and the inspector shows it
+    let t = agent_text(&mut h, click("iterm2"));
+    assert!(t.contains("selected: iterm2 (cask)"), "{t}");
+
+    // shortcut + typed filter, like a person would
+    agent_text(
+        &mut h,
+        Command::Key {
+            combo: "cmd+1".into(),
+            repeat: 1,
+        },
+    );
+    pump(&mut h);
+    assert_eq!(h.state().view, View::Installed);
+    let t = agent_text(
+        &mut h,
+        Command::Type {
+            text: "rip".into(),
+            label: Some("FILTER".into()),
+            submit: false,
+        },
+    );
+    pump(&mut h);
+    assert_eq!(row_names(&h), ["ripgrep"]);
+    assert!(t.contains("[input] FILTER = \"rip\""), "{t}");
+}
+
+#[test]
+fn agent_is_kept_out_of_confirmations_unless_allowed() {
+    let mut h = harness();
+    h.state_mut().agent.enable_without_server();
+    h.run_steps(2);
+
+    agent_text(&mut h, click("UPGRADE ALL  2"));
+    assert!(matches!(
+        h.state().dialog,
+        Some(OpenDialog {
+            state: DialogState::Confirm(_),
+            ..
+        })
+    ));
+    // only the dialog is addressable now, and its verb is reserved for the human
+    let t = agent_text(&mut h, Command::Observe);
+    assert!(t.contains("dialog: CONFIRM"), "{t}");
+    assert!(t.contains("a dialog is open"), "{t}");
+    assert!(t.contains("[button] UPGRADE ALL (human only)"), "{t}");
+    assert!(!t.contains("[item] INSTALLED"), "{t}");
+    for cmd in [
+        click("UPGRADE ALL"),
+        Command::Key {
+            combo: "enter".into(),
+            repeat: 1,
+        },
+    ] {
+        match agent(&mut h, cmd) {
+            Reply::Error(e) => assert!(e.contains("reserved for the human"), "{e}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    assert!(!log_has(&h, "$ brew upgrade"));
+
+    // cancelling is fine
+    agent_text(&mut h, click("CANCEL"));
+    h.run_steps(15); // fade-out
+    assert!(h.state().dialog.is_none());
+
+    // with the setting on, the agent may confirm: the fake brew runs
+    h.state_mut().settings.agent_confirm = true;
+    agent_text(&mut h, click("UPGRADE ALL  2"));
+    let t = agent_text(&mut h, click("UPGRADE ALL"));
+    assert!(!t.contains("human only"), "{t}");
+    pump(&mut h);
+    assert!(log_has(&h, "$ brew upgrade"));
+    assert!(log_has(&h, "==> upgrade"));
 }

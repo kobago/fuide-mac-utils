@@ -125,6 +125,8 @@ pub struct BrewApp {
     last_error: Option<String>,
     fetch_ms: f32,
     devshot: fuide::devshot::DevShot,
+    /// MCP interface for AI agents (`fuide::agent`); on/off in the settings window.
+    agent: fuide::Agent,
     dev_dialog: Option<String>,
     /// Dev aids: `FUIDE_DEV_RUN="doctor"` runs a brew command at start; `FUIDE_DEV_SEARCH=q` opens Search.
     dev_run: Option<String>,
@@ -181,6 +183,7 @@ impl BrewApp {
             last_error: None,
             fetch_ms: 0.0,
             devshot: fuide::devshot::DevShot::from_env(),
+            agent: fuide::Agent::new(APP_ID, "FUIDE Brew"),
             dev_dialog: std::env::var("FUIDE_DEV_DIALOG").ok(),
             dev_run: std::env::var("FUIDE_DEV_RUN").ok(),
             dev_search: std::env::var("FUIDE_DEV_SEARCH").ok(),
@@ -194,6 +197,14 @@ impl BrewApp {
             settings_path: None,
         };
         app.push_log(0.0, "brew console online :: reading inventory", Level::Ok);
+        app.agent.set_enabled(ctx, app.settings.agent);
+        if app.settings.agent {
+            app.push_log(
+                0.0,
+                "agent // interface on :: waiting for a client",
+                Level::Warn,
+            );
+        }
         // Dev aid: `FUIDE_DEV_SETTINGS=1` opens the settings window at start (screenshots).
         if std::env::var_os("FUIDE_DEV_SETTINGS").is_some() {
             app.settings_win.open();
@@ -227,6 +238,108 @@ impl BrewApp {
         let line = line.into();
         self.push_log(t, format!("{line} :: {detail}"), Level::Ok);
         self.notice_queue.push_back((true, line));
+    }
+
+    /// While a confirmation is open and the agent may not confirm, its verb is human-only.
+    fn agent_blocked(&self) -> Vec<String> {
+        match &self.dialog {
+            Some(OpenDialog {
+                state: DialogState::Confirm(c),
+                closing: false,
+            }) if !self.settings.agent_confirm => vec![c.verb.clone()],
+            _ => Vec::new(),
+        }
+    }
+
+    /// State summary for the agent's `observe` (what the widgets alone do not say).
+    fn agent_state(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        let _ = writeln!(
+            s,
+            "view: {} :: rows: {} :: filter: {:?}",
+            self.view.label().to_uppercase(),
+            self.rows.len(),
+            self.filter
+        );
+        if self.view == View::Search {
+            let _ = writeln!(
+                s,
+                "search query: {:?} :: results: {}",
+                self.search_query,
+                self.search_results.len()
+            );
+        }
+        match self.selected_package() {
+            Some(p) => {
+                let _ = writeln!(
+                    s,
+                    "selected: {} ({}) installed {} :: latest {}{}{}",
+                    p.name,
+                    if p.kind == Kind::Cask {
+                        "cask"
+                    } else {
+                        "formula"
+                    },
+                    if p.installed.is_empty() {
+                        "-".to_string()
+                    } else {
+                        p.installed.join(", ")
+                    },
+                    p.latest,
+                    if p.outdated { " :: OUTDATED" } else { "" },
+                    if p.pinned { " :: PINNED" } else { "" },
+                );
+            }
+            None => s.push_str("selected: none\n"),
+        }
+        if self.brew.fetching() {
+            s.push_str("inventory: reading\n");
+        }
+        if self.search_pending.is_some() {
+            s.push_str("search: running\n");
+        }
+        if let Some(l) = self.brew.running() {
+            let _ = writeln!(s, "running: {l}");
+        }
+        if let Some(e) = &self.last_error {
+            let _ = writeln!(s, "last error: {e}");
+        }
+        if self.dialog.as_ref().is_some_and(|d| d.closing) {
+            s.push_str("dialog: closing\n");
+        }
+        match self.dialog.as_ref().filter(|d| !d.closing) {
+            Some(OpenDialog {
+                state: DialogState::Confirm(c),
+                ..
+            }) => {
+                let _ = writeln!(
+                    s,
+                    "dialog: CONFIRM {} :: {} :: brew {} :: buttons CANCEL / {}",
+                    c.title.to_uppercase(),
+                    c.line,
+                    c.args.join(" "),
+                    c.verb
+                );
+            }
+            Some(OpenDialog {
+                state: DialogState::Notice { success, line },
+                ..
+            }) => {
+                let _ = writeln!(
+                    s,
+                    "dialog: {} :: {line} :: press ACKNOWLEDGE",
+                    if *success { "SUCCESS" } else { "ERROR" }
+                );
+            }
+            None => {}
+        }
+        s.push_str("log (latest last):\n");
+        let skip = self.log.len().saturating_sub(6);
+        for e in &self.log[skip..] {
+            let _ = writeln!(s, "  {} {}", e.time, e.text);
+        }
+        s
     }
 
     fn source(&self) -> &[Package] {
@@ -531,10 +644,16 @@ impl BrewApp {
         self.push_log(
             t,
             format!(
-                "settings // palette {} :: {} :: {}",
+                "settings // palette {} :: {} :: {} :: agent {}{}",
                 s.palette.name(),
                 if s.chamfer { "chamfer" } else { "square" },
-                if s.compact { "compact" } else { "normal" }
+                if s.compact { "compact" } else { "normal" },
+                if s.agent { "on" } else { "off" },
+                if s.agent && s.agent_confirm {
+                    " (may confirm)"
+                } else {
+                    ""
+                }
             ),
             Level::Warn,
         );
@@ -607,6 +726,11 @@ impl eframe::App for BrewApp {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.devshot.tick(ui.ctx());
+        // agent first: injected input must be visible to this frame's widgets
+        self.agent.set_enabled(ui.ctx(), self.settings.agent);
+        self.agent.set_blocked(self.agent_blocked());
+        let agent_state = self.agent.wants_state().then(|| self.agent_state());
+        self.agent.tick(ui.ctx(), agent_state);
         let t = ui.input(|i| i.time);
         let ctx = ui.ctx().clone();
         self.poll(&ctx, t);
@@ -698,6 +822,9 @@ impl eframe::App for BrewApp {
                 true,
             );
         }
+        if let Some((text, busy)) = self.agent.lamp() {
+            shell = shell.lamp(text, if busy { pal.warn } else { pal.accent }, busy);
+        }
 
         let mut log_resized = false;
         let out = shell.show_full(ui, |ui| {
@@ -744,6 +871,7 @@ impl eframe::App for BrewApp {
             );
             log_resized = resp.drag_stopped();
         });
+        self.agent.paint(&ctx);
         if out.settings_clicked {
             actions.push(Action::OpenSettings);
         }
@@ -760,6 +888,8 @@ impl eframe::App for BrewApp {
             self.rebuild_rows();
         }
         // Settings window (child viewport) last: it pauses this viewport while it draws.
+        self.settings_win
+            .set_agent_status(&ctx, &self.agent.status_line());
         if self
             .settings_win
             .show(&ctx, &mut self.settings, "FUIDE Brew")
