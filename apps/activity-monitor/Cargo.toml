@@ -1,0 +1,35 @@
+[package]
+name = "fuide-activity-monitor"
+description = "Activity monitor (CPU / memory / energy / disk / network) with a Sci-Fi FUI look, built on egui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "fuide_activity_monitor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fuide-activity-monitor"
+path = "src/main.rs"
+
+[dependencies]
+egui = { workspace = true }
+eframe = { workspace = true }
+fuide = { workspace = true }
+libc = "0.2"
+mach2 = "0.4"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFString", "CFDictionary", "CFNumber", "CFArray"] }
+objc2-io-kit = { version = "0.3", default-features = false, features = ["std", "libc", "pwr_mgt", "ps"] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.36.1", features = ["eframe", "wgpu", "snapshot"] }
+
+[package.metadata.bundle]
+name = "FUIDE Activity Monitor"
+identifier = "fuide.activity-monitor"
+short_description = "Activity monitor with a Sci-Fi FUI look"
+icon = ["assets/icons/activity-monitor.svg"]
+category = "public.app-category.utilities"
+copyright = "Copyright (c) 2026 Go Kobayashi"
+osx_minimum_system_version = "13.0"

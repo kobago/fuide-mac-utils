@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect x="64" y="64" width="896" height="896" fill="#060C12"/>
+  <rect x="64" y="64" width="896" height="896" fill="none" stroke="#00E5FF" stroke-width="14"/>
+  <rect x="112" y="112" width="800" height="800" fill="none" stroke="#00788C" stroke-width="6"/>
+  <line x1="200" y1="700" x2="824" y2="700" stroke="#00788C" stroke-width="8"/>
+  <line x1="200" y1="560" x2="824" y2="560" stroke="#00788C" stroke-width="4" opacity="0.6"/>
+  <line x1="200" y1="420" x2="824" y2="420" stroke="#00788C" stroke-width="4" opacity="0.6"/>
+  <polyline points="200,640 300,600 380,660 460,340 540,520 620,300 700,600 780,560 824,580" fill="none" stroke="#00E5FF" stroke-width="40" stroke-linejoin="miter" stroke-linecap="square"/>
+  <polygon points="200,640 300,600 380,660 460,340 540,520 620,300 700,600 780,560 824,580 824,700 200,700" fill="#00E5FF" opacity="0.18"/>
+  <rect x="200" y="760" width="72" height="56" fill="#00E5FF"/>
+  <rect x="292" y="760" width="72" height="56" fill="#00E5FF"/>
+  <rect x="384" y="760" width="72" height="56" fill="#00E5FF"/>
+  <rect x="476" y="760" width="72" height="56" fill="#00E5FF" opacity="0.6"/>
+  <rect x="568" y="760" width="72" height="56" fill="#00788C" opacity="0.6"/>
+  <rect x="660" y="760" width="72" height="56" fill="#00788C" opacity="0.6"/>
+  <rect x="752" y="760" width="72" height="56" fill="#00788C" opacity="0.6"/>
+  <rect x="140" y="140" width="220" height="40" fill="#00E5FF" opacity="0.85"/>
+</svg>
