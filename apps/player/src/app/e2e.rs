@@ -10,6 +10,9 @@ use egui_kittest::Harness;
 use super::*;
 use crate::player::fake::FakeBackend;
 
+/// Frames (at 60 fps) that let the panel slide / fold animation (`PANEL_ANIM`) settle.
+const PANEL_STEPS: usize = 24;
+
 /// The app opens picture-only; the tests that click panel buttons show the panels first.
 fn harness_with_panels() -> Harness<'static, PlayerApp> {
     let mut h = harness();
@@ -170,7 +173,7 @@ fn snapshots_idle_video_and_audio() {
     h.run_steps(3);
     h.snapshot("player_theater_idle");
     h.key_press(Key::Tab);
-    h.run_steps(3);
+    h.run_steps(PANEL_STEPS);
     h.snapshot("player_idle");
 
     let ctx = h.ctx.clone();
@@ -200,10 +203,10 @@ fn snapshots_idle_video_and_audio() {
 
     // picture only: the HUD strip above the frame, the transport under it, nothing on it
     h.key_press(Key::Tab);
-    h.run_steps(3);
+    h.run_steps(PANEL_STEPS);
     h.snapshot("player_theater_video");
     h.key_press(Key::Tab);
-    h.run_steps(3);
+    h.run_steps(PANEL_STEPS);
 
     h.state_mut().apply(&ctx, Action::Next, 0.0);
     h.run_steps(10);

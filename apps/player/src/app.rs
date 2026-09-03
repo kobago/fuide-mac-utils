@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use egui::{pos2, vec2, Align2, Color32, Key, Rect, RichText, ScrollArea, Sense, Stroke, Ui};
+use egui::{pos2, vec2, Align2, Color32, Id, Key, Rect, RichText, ScrollArea, Sense, Stroke, Ui};
 use fuide::widgets::{self, Icon, LogLine};
 use fuide::{
     fx, mono, palette, theme, type_scale, Dialog, PaletteKind, Panel, Settings, SettingsWindow,
@@ -31,6 +31,8 @@ const LOG_H: f32 = 100.0;
 const LOG_MIN: f32 = 60.0;
 /// Header strip left when the log panel is collapsed (`Settings::log_open` = false).
 const LOG_CLOSED: f32 = 26.0;
+/// Seconds the panels take to slide in / out (Tab) and the log to fold (its chip).
+const PANEL_ANIM: f32 = 0.24;
 /// Space kept for the panels above the log when the divider is dragged up.
 const BODY_MIN: f32 = 320.0;
 /// Arrow keys: seconds per press (Shift multiplies by 6).
@@ -1226,31 +1228,50 @@ impl eframe::App for PlayerApp {
             }
             return;
         }
+        // Tab and the log chip animate rather than snap: the side panels slide in from the
+        // window edges, the log rises from the bottom edge, the picture follows the space that
+        // is left, and the moving panels fade with the slide. `k` = 0 is the theater layout
+        // (screen + transport only), 1 the full one; egui returns the target on the first frame
+        // so nothing animates at startup.
+        let k = ctx.animate_bool_with_time_and_easing(
+            Id::new("player-panels"),
+            panels,
+            PANEL_ANIM,
+            egui::emath::easing::cubic_out,
+        );
+        let k_log = ctx.animate_bool_with_time_and_easing(
+            Id::new("player-log-open"),
+            log_open,
+            PANEL_ANIM,
+            egui::emath::easing::cubic_out,
+        );
         let out = shell.show_full(ui, |ui| {
             let c = ui.max_rect();
             let top = c.top() + 10.0; // room for title chips above the first panels
-            if !panels {
-                // theater: the screen takes the window, the transport sits under it — the
-                // picture is never overlaid by controls
-                let transport = Rect::from_min_max(pos2(c.left(), c.bottom() - transport_h), c.max);
-                let screen = Rect::from_min_max(
-                    pos2(c.left(), top),
-                    pos2(c.right(), transport.top() - GAP - 8.0),
-                );
-                self.ui_screen(ui, screen, t, drop_hover, &mut actions);
-                self.ui_transport(ui, transport, &mut actions);
-                return;
-            }
             let log_max = c.height() - BODY_MIN;
             self.log_h = self.log_h.clamp(LOG_MIN, log_max.max(LOG_MIN));
-            let log_h = if log_open { self.log_h } else { LOG_CLOSED };
-            let log_rect = Rect::from_min_max(pos2(c.left(), c.bottom() - log_h), c.max);
+            // log height as drawn: header strip <-> open height
+            let log_h = egui::lerp(LOG_CLOSED..=self.log_h, k_log);
+            // how far the hidden panels sit past the window edges
+            let slide = 1.0 - k;
+            let dx_left = (LEFT_W + GAP) * slide;
+            let dx_right = (RIGHT_W + GAP) * slide;
+            let dy_log = (log_h + GAP + 8.0) * slide;
+            let log_rect = Rect::from_min_max(
+                pos2(c.left(), c.bottom() - log_h + dy_log),
+                pos2(c.right(), c.bottom() + dy_log),
+            );
             let body_bottom = log_rect.top() - GAP - 8.0;
 
-            let left =
-                Rect::from_min_max(pos2(c.left(), top), pos2(c.left() + LEFT_W, body_bottom));
-            let right =
-                Rect::from_min_max(pos2(c.right() - RIGHT_W, top), pos2(c.right(), body_bottom));
+            let left = Rect::from_min_max(
+                pos2(c.left() - dx_left, top),
+                pos2(c.left() + LEFT_W - dx_left, body_bottom),
+            );
+            let right = Rect::from_min_max(
+                pos2(c.right() - RIGHT_W + dx_right, top),
+                pos2(c.right() + dx_right, body_bottom),
+            );
+            // at k = 0 this is the whole content area: the picture is never overlaid by controls
             let center = Rect::from_min_max(
                 pos2(left.right() + GAP, top),
                 pos2(right.left() - GAP, body_bottom),
@@ -1264,27 +1285,34 @@ impl eframe::App for PlayerApp {
                 pos2(center.right(), transport.top() - GAP - 8.0),
             );
 
-            self.ui_queue(ui, left, &mut actions);
             self.ui_screen(ui, screen, t, drop_hover, &mut actions);
             self.ui_transport(ui, transport, &mut actions);
-            self.ui_media(ui, right, &mut actions);
-            if log_open {
-                let strip = Rect::from_min_max(
-                    pos2(c.left(), body_bottom),
-                    pos2(c.right(), log_rect.top()),
-                );
-                let resp = widgets::h_splitter(
-                    ui,
-                    strip,
-                    "log",
-                    &mut self.log_h,
-                    LOG_MIN,
-                    log_max,
-                    "LOG HEIGHT",
-                );
-                log_resized = resp.drag_stopped();
+            if k <= 0.0 {
+                return; // theater: the panels are fully off screen, none of their widgets exist
             }
-            log_toggled = self.ui_log(ui, log_rect, log_open);
+            ui.scope(|ui| {
+                ui.multiply_opacity(k);
+                self.ui_queue(ui, left, &mut actions);
+                self.ui_media(ui, right, &mut actions);
+                if log_open && k >= 1.0 {
+                    let strip = Rect::from_min_max(
+                        pos2(c.left(), body_bottom),
+                        pos2(c.right(), log_rect.top()),
+                    );
+                    let resp = widgets::h_splitter(
+                        ui,
+                        strip,
+                        "log",
+                        &mut self.log_h,
+                        LOG_MIN,
+                        log_max,
+                        "LOG HEIGHT",
+                    );
+                    log_resized = resp.drag_stopped();
+                }
+                // the feed stays while the panel folds up
+                log_toggled = self.ui_log(ui, log_rect, log_open, k_log > 0.0);
+            });
         });
         self.agent.paint(&ctx);
         if out.settings_clicked {
@@ -2533,13 +2561,15 @@ impl PlayerApp {
     }
 
     /// Returns `true` when the title chip was clicked (the caller flips `Settings::log_open`).
-    fn ui_log(&self, ui: &mut Ui, rect: Rect, open: bool) -> bool {
+    /// `open` is the setting (the chip shows `[-]` / `[+]`); `feed` says whether to lay the
+    /// lines out — true while the panel is still folding up.
+    fn ui_log(&self, ui: &mut Ui, rect: Rect, open: bool, feed: bool) -> bool {
         let pal = palette(ui.ctx());
         let (_, toggled) = Panel::new("Event log")
             .tag(format!("{} events", self.log.len()), pal.text_dim)
             .padding(8.0, 12.0)
             .show_collapsible_rect(ui, rect, open, |ui| {
-                if !open {
+                if !feed {
                     return; // just the header strip
                 }
                 let lines: Vec<LogLine> = self
