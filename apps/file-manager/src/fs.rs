@@ -285,34 +285,7 @@ pub fn volumes() -> Vec<(String, PathBuf)> {
 // ---------------------------------------------------------------------------
 // Go to path (typed navigation)
 
-/// Expand `~` and make `input` absolute against `cwd`, then drop `.` / `..` lexically (no
-/// symlink resolution — the path is shown as typed).
-fn expand(input: &str, cwd: &Path) -> PathBuf {
-    let home = || std::env::var_os("HOME").map(PathBuf::from);
-    let raw = if input == "~" {
-        home().unwrap_or_else(|| PathBuf::from("/"))
-    } else if let Some(rest) = input.strip_prefix("~/") {
-        home().unwrap_or_else(|| PathBuf::from("/")).join(rest)
-    } else if input.starts_with('/') {
-        PathBuf::from(input)
-    } else {
-        cwd.join(input)
-    };
-    let mut out = PathBuf::new();
-    for c in raw.components() {
-        match c {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    if out.as_os_str().is_empty() {
-        out.push("/");
-    }
-    out
-}
+use fuide::pathinput::expand;
 
 /// Where a typed path leads: the directory to show, plus the file to select when the path
 /// names a file (Finder's "Go to Folder" does the same). `~`, relative paths and `..` work.
@@ -337,57 +310,12 @@ pub fn resolve_goto(input: &str, cwd: &Path) -> Result<(PathBuf, Option<String>)
     Ok((parent, name))
 }
 
-/// Completions for a partially typed path: the directories in the parent of the last
-/// component whose name starts with it (case-insensitive), each returned as the full input
-/// to substitute (the typed prefix style — `~/`, relative — is kept) with a trailing `/`.
-/// Hidden directories only appear once the component starts with `.`. Sorted, at most `max`.
+/// Directory completions for the go-to dialog (see `fuide::pathinput::complete`).
 pub fn complete_goto(input: &str, cwd: &Path, max: usize) -> Vec<String> {
-    let (head, part) = match input.rfind('/') {
-        Some(i) => (&input[..=i], &input[i + 1..]),
-        None => ("", input),
-    };
-    if head.is_empty() && (part == "~" || part.is_empty()) {
-        return Vec::new();
-    }
-    let dir = if head.is_empty() {
-        cwd.to_path_buf()
-    } else {
-        expand(head, cwd)
-    };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let want = part.to_lowercase();
-    let mut names: Vec<String> = rd
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.to_lowercase().starts_with(&want))
-        .filter(|n| !n.starts_with('.') || part.starts_with('.'))
-        .collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    names.truncate(max);
-    names.into_iter().map(|n| format!("{head}{n}/")).collect()
+    fuide::pathinput::complete(input, cwd, false, max)
 }
 
-/// Longest common prefix of the candidates (what Tab fills in when several match).
-pub fn common_prefix(items: &[String]) -> String {
-    let Some(first) = items.first() else {
-        return String::new();
-    };
-    let mut end = first.len();
-    for other in &items[1..] {
-        end = first
-            .char_indices()
-            .zip(other.chars())
-            .take_while(|((_, a), b)| a == b)
-            .last()
-            .map(|((i, a), _)| i + a.len_utf8())
-            .unwrap_or(0)
-            .min(end);
-    }
-    first[..end].to_string()
-}
+pub use fuide::pathinput::common_prefix;
 
 // ---------------------------------------------------------------------------
 // Mutating operations (rename / move / copy / trash / delete)

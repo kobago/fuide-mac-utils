@@ -2794,7 +2794,6 @@ impl Explorer {
     }
 }
 
-/// One breadcrumb segment. The last one is the current directory (accent, not clickable).
 /// Breadcrumb segment. Ancestors navigate; the last one (the current directory) opens the
 /// go-to-path dialog.
 fn crumb(ui: &mut Ui, label: &str, last: bool, pal: &Palette) -> egui::Response {
