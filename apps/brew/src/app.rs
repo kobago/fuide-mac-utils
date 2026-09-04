@@ -650,10 +650,15 @@ impl BrewApp {
         self.push_log(
             t,
             format!(
-                "settings // palette {} :: {} :: {} :: agent {}{}",
+                "settings // palette {} :: {} :: {} :: {} :: agent {}{}",
                 s.palette.name(),
                 if s.chamfer { "chamfer" } else { "square" },
                 if s.compact { "compact" } else { "normal" },
+                if s.transparent {
+                    "translucent"
+                } else {
+                    "opaque"
+                },
                 if s.agent { "on" } else { "off" },
                 if s.agent && s.agent_confirm {
                     " (may confirm)"

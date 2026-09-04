@@ -320,6 +320,18 @@ fn the_gear_opens_settings_and_a_palette_click_restyles_and_saves() {
     h.run_steps(3);
     assert!(Settings::load_from(&conf).unwrap().chamfer);
 
+    // window transparency: OPAQUE paints the ground at full alpha and is saved
+    assert!(palette(&h.ctx).bg_deep.a() < 255);
+    h.get_by_label("OPAQUE").click();
+    h.run_steps(3);
+    assert!(!h.state().settings.transparent);
+    assert_eq!(palette(&h.ctx).bg_deep.a(), 255);
+    assert!(!Settings::load_from(&conf).unwrap().transparent);
+    h.get_by_label("TRANSLUCENT").click();
+    h.run_steps(3);
+    assert!(palette(&h.ctx).bg_deep.a() < 255);
+    assert!(Settings::load_from(&conf).unwrap().transparent);
+
     h.key_press(Key::Escape);
     h.run_steps(3);
     assert!(!h.state().settings_win.is_open());
