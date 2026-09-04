@@ -1077,7 +1077,7 @@ impl BrewApp {
             if widgets::icon_button(
                 ui,
                 vec2(32.0, ts.row),
-                widgets::Icon::ArrowDown,
+                widgets::Icon::Refresh,
                 !self.brew.fetching(),
             )
             .on_hover_text("Reload inventory")
