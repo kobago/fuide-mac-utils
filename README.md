@@ -1,25 +1,19 @@
-# FUIDE — FUI Develop Environment
+# FUIDE Mac Utils
 
-Sci-Fi / FUI (Futuristic UI) デザインのアプリを作るための開発環境。中核は egui (0.36) 向けの `fuide` クレート (テーマ・窓シェル・部品) で、その上にアプリとしてファイルマネージャー、Homebrew フロントエンド、オーディオ / 動画プレイヤー、アクティビティモニター (macOS デスクトップ) を載せています。今後はモバイルなどデスクトップ以外のアプリも同じ基盤で作る予定です。
+[FUIDE](https://github.com/kobago/fuide) (Sci-Fi / FUI デザインの egui 部品ライブラリ `fuide`) の上に載せた macOS デスクトップユーティリティ 4 本。
 
 ```
-crates/fuide/        FUI 部品ライブラリ `fuide` (egui のみ依存)
-  theme.rs           パレット CYAN / AMBER / GREEN、フォント登録、ウィジェットスタイル
-  shell.rs           フレームレス窓シェル (直角の枠、グロー、タイトル/ステータスバー、リサイズ)
-  panel.rs           タイトルチップ付きパネル
-  widgets.rs         ナビタブ、ボタン、セグメントバー、円弧ゲージ、ランプ、ログフィード、読み出し行
-  fx.rs              走査線、走査帯
-  geom.rs            多角形、グロー描画 (チャンファーはオプション)
-  pathinput.rs       パス入力欄の `~` / 相対パス展開と Tab 補完 (ffm の GO TO、プレイヤーの OPEN)
-crates/fuide-3d/     3D ビューポート `fuide-3d` (wgpu): Z-up オービットカメラ、ホログラム塗り + グローする線、egui ウィジェット
-apps/file-manager/   FUIDE File Manager — Finder 風ファイルブラウザ (macOS)
-apps/brew/           FUIDE Brew — Homebrew の GUI (brew info --json / search / streaming runner)
-apps/player/         FUIDE Player — オーディオ / 動画プレイヤー (AVFoundation、ファイルと http(s) URL)
+apps/file-manager/      FUIDE File Manager — Finder 風ファイルブラウザ
+apps/brew/              FUIDE Brew — Homebrew の GUI (brew info --json / search / streaming runner)
+apps/player/            FUIDE Player — オーディオ / 動画プレイヤー (AVFoundation、ファイルと http(s) URL)
 apps/activity-monitor/  FUIDE Activity Monitor — CPU / メモリ / エネルギー / ディスク / ネットワークのプロセス監視 (libproc / Mach / IOKit)
-apps/cad/            FUIDE CAD — パラメトリック 3D CAD (Manifold のメッシュカーネル + truck、フィーチャー列 + 式、ねじ山、STL / JSON、MCP の CAD 専用ツール)
-apps/git/            FUIDE Git — Git クライアント (読み書きとも `git` CLI、hunk 単位のステージ、コミットグラフ、fetch / push のストリーミング出力)
-assets/fonts/        Orbitron (見出し) / Share Tech Mono (データ) — いずれも OFL
+assets/icons/           .app のアイコン (SVG)
+scripts/                release.sh (.app / DMG)、install-cli.sh (ターミナル用ランチャー)
 ```
+
+`fuide` は git 依存 (`Cargo.toml` の `[workspace.dependencies]`)。`fuide` クレート自体を隣の `../fuide` で直しながら動かすときは `Cargo.toml` 末尾のコメントの `[patch]` を外す。
+
+共通の仕組み (設定ウィンドウ、MCP エージェント、テストの決めごと、再描画レート) は [kobago/fuide](https://github.com/kobago/fuide) の README を参照。
 
 ## FUIDE File Manager
 
@@ -168,129 +162,17 @@ macOS の「アクティビティモニタ」と同じ 5 タブ構成。**上: C
 - **ENERGY は推定値**: Apple の「エネルギー影響」の式は非公開 (`powermetrics` は root 必須) なので、CPU % + ウェイクアップ + ディスク / ネット量の加重 (`sys::energy_estimate`) を出し、パネルに `ESTIMATE :: NOT APPLE'S SCALE` と明記している。順位付けには使える
 - テストは `sys::Source` トレイトの偽実装 (`sys::fake::FakeSource`、10 プロセスの固定マシン) で回す。`sys::mac` の単体テストだけ実機を読む (自分のプロセスが Full、pid 1 が Limited になること)
 
-## FUIDE CAD
-
-```sh
-cargo run -p fuide-cad                      # 空のドキュメント
-cargo run -p fuide-cad -- bracket.cad.json  # ドキュメントを開く
-FUIDE_DEV_SAMPLE=1 cargo run -p fuide-cad   # サンプル (穴あきブラケット) を読み込んで起動
-```
-
-小型ロボットの部品を個人で手軽に設計するための CAD ([#5](https://github.com/kobago/fuide/issues/5))。**マウスで線を引く CAD ではなく、フィーチャー列 (操作履歴) とパラメータを編集する CAD** で、GUI からもテキスト (JSON / MCP) からも同じ列を編集する。単位は mm、値はすべて式 (`w / 2 + 3`、`sqrt` / `sin` / `min` …、パラメータ名を参照できる)。
-
-カーネルは 2 つのハイブリッド (`apps/cad/src/mesh.rs` と `kernel.rs`、どちらも GUI 無しでテストできる):
-
-- **モデリングと表示は Manifold** ([manifold-rust](https://github.com/larsbrubaker/manifold-rust)、OpenSCAD が採用したメッシュブーリアンの純 Rust 移植、Apache-2.0、git 依存で rev 固定)。形状は閉じた三角形メッシュで、ブーリアンは厳密で失敗しない (共平面の面も、稜線を通る円柱も可)。曲面は弦公差 (0.02 mm) から決めた分割数の多角形。稜線は隣接三角形の二面角 (30° 超) から拾う。**ねじ山**はらせんの V 断面を (角度, 高さ) の高さ場として直接メッシュ生成する (`THREAD` フィーチャー)
-- **truck** ([ricosjp/truck](https://github.com/ricosjp/truck)、Rust 製 B-rep カーネル、master を rev 固定) は STEP の入出力のために残してある (未接続)。B-rep でのモデリングは `kernel.rs` に実装とテストが揃っているが、ブーリアンが自由曲面や共平面に弱く、らせん掃引が無いので、モデリングの主役からは外した。切り替え時の知見は下に残す
-
-- **左上: FEATURES** — フィーチャー列 (NAME / KIND / STATE / #)。行クリックで選択、ダブルクリックで抑制 (SUPPRESS) の切替。STATE は `BODY` (結果の実体) / `USED` (後のフィーチャーに消費された) / `ERROR` / `OFF`
-- **左下: PARAMETERS** — 名前 = 式 の一覧 (右に評価値)。`×` で削除、下の NAME / VALUE + ADD で追加
-- **中央: ツールバー 2 段 + VIEWPORT** — 1 段目 `ADD BOX / CYLINDER / THREAD`、`UNION / CUT / INTERSECT` (選択中のフィーチャーを A にして、次にクリックした行が B。ESC で取消)、`MOVE / ROTATE` (選択中のフィーチャーを消費する変換を追加)。2 段目 `ISO / FRONT / TOP / RIGHT / FIT` と表示モード `SHADED / WIRE / X-RAY`。ビューポートはドラッグでオービット、Shift+ドラッグ (または右 / 中ボタン) でパン、ホイールでズーム、ダブルクリックで FIT。結果の実体をホログラム塗り + 稜線のグローで描き、選択中の実体は稜線が注意色になる。XY 平面のグリッドと XYZ 軸 (赤 / 緑 / アクセント)、左下に三軸のトライアド
-- **右上: SELECTED** — 選択中のフィーチャーの名前 (編集可)、入力 (`#3 BODY // #4 MOUNT HOLE`)、各フィールドの式の入力欄 (`ORIGIN.X` … 打ち替えると即再評価)、AXIS チップ、状態、SUPPRESS / REMOVE (後のフィーチャーが使っていれば拒否)
-- **右下: MEASURE** — 選択中 (無ければ最初) の実体の体積 (cm³)、寸法、最小点、重心、三角形数、稜線数
-- **下: イベントログ**、ステータスバー (`KERNEL` ランプは評価中に点滅、エラー数、`AGENT`)
-
-| 操作 | キー |
-|---|---|
-| 選択移動 / 解除 | ↑↓ / Esc |
-| 視点 / フィット | 1 (ISO) 2 (FRONT) 3 (TOP) 4 (RIGHT) / F |
-| 取り消し / やり直し | Cmd+Z / Cmd+Shift+Z (100 段。同じ欄の連続編集は 2 秒以内なら 1 段) |
-| 開く | Cmd+O: **macOS のファイルダイアログ** (`NSOpenPanel`、`.json` のみ)。Cmd+L: アプリ内のパス入力ダイアログ (`~` と相対パス、Tab 補完。**MCP エージェントはこちら**、macOS のダイアログの中は見えない) |
-| 新規 / 保存 / STL 書き出し | Cmd+N / Cmd+S / Cmd+E (保存と書き出しはアプリ内のパス入力ダイアログ。既存ファイルへの上書きは確認ダイアログで、エージェントは人間留保) |
-| フィーチャーを削除 | Cmd+Backspace |
-| 設定 / 終了 | Cmd+, / Cmd+W |
-
-ファイルは JSON (`*.cad.json`): `params` と `features` の列。フィーチャーは `box {origin, size}` / `cylinder {base, axis, radius, height}` / `thread {base, axis, diameter, pitch, length}` (ISO 風の外ねじ。頭や軸芯と UNION する) / `boolean {op, a, b}` / `translate {target, by}` / `rotate {target, origin, axis, angle}`。`a` / `b` / `target` は先のフィーチャーの id で、**参照されたフィーチャーは消費される**: 後のフィーチャーに消費されていない実体が結果 (複数あってよい)。STL は結果の実体をまとめてバイナリで書く。
-
-truck を B-rep モデリングに使っていたときに分かった癖と対処 (`kernel.rs` に残っている):
-
-- ブーリアンの公差は部品寸法の約 1 % が安定。細かすぎると `None` か内部 panic。結果の三角形化はメッシュ公差との組み合わせで panic するので、ブーリアン公差 × ナッジ × メッシュ公差を一緒に探索し、面が全部揃って三角形化できた候補だけ採用する
-- **共平面の面同士は交差計算できない** (`This wire is not simple`): 工具側を重心まわりに 0.9999 / 1.0001 倍して再試行する。角の稜線を円柱が通る退化配置は失敗する
-- カーネルの panic は `catch_unwind` でエラーに変え、フィーチャーを `ERROR` にして続行する (Manifold でも同じ守りを掛けている)。評価は別スレッドで、編集中は前の実体を表示し続ける
-- 面と三角形の順序が並列イテレーターで実行ごとに変わる (重心でソートして固定)。フィレット / チャンファーは無い。らせん掃引が無いのでねじ山は作れない → Manifold へ
-
-MCP: 汎用の `observe` / `click` / `type` に加えて **CAD 専用ツール** がある (下の「AI エージェントから操作する」)。`document` (JSON 全体)、`add_feature` (JSON のフィーチャーをそのまま渡す。`thread` も可、`union` / `cut` / `intersect` は `boolean` の略記)、`set_field` (`size.z` / `axis` / `name` / `suppressed`)、`remove_feature`、`set_param` / `remove_param`、`select`、`measure` (体積・寸法・重心・エラー)、`view` (視点 / モード / フィット)、`export` (STL / JSON。既存ファイルへの上書きは人間留保)、`open` (`new: true` で新規)。各ツールは通常の操作と同じ経路 (ログ、取り消し) を通り、結果の文の後に観測が付く。
-
-撮影フック: `FUIDE_DEV_SAMPLE=1`、`FUIDE_DEV_DIALOG=open|save|overwrite|error`。
-
-## FUIDE Git
-
-```sh
-cargo run -p fuide-git                 # 最近開いたリポジトリ (無ければカレントディレクトリ)
-cargo run -p fuide-git -- ~/src/repo   # リポジトリを指定して開く
-```
-
-Git クライアント ([#4](https://github.com/kobago/fuide/issues/4))。**libgit2 / gitoxide は使わず、読み書きともに `git` CLI だけ**を呼ぶ (`apps/git/src/git.rs`)。読み取りは `status --porcelain=v2 -z` / `log` / `for-each-ref` / `diff` / `show` を別スレッドで実行して 1 メッセージで返す。変更系 (`add` / `restore` / `commit` / `switch` / `fetch` / `pull` / `push` / `apply`) はすべて brew と同じストリーミング runner を通り、出力が 1 行ずつログに流れ、完了後にリポジトリを読み直す。同時実行は 1 つ。fetch / push は git 自身の credential helper に任せる (`GIT_TERMINAL_PROMPT=0` なので対話は起きず、失敗は ERROR カード)。
-
-- **左上: REPOSITORY** — 名前、パス、ブランチ、upstream、ahead / behind、OPEN (パス入力ダイアログ、Tab 補完) / FETCH、最近開いたリポジトリ (`~/Library/Application Support/FUIDE/git-recent.conf`)。Finder や ffm からディレクトリをドロップしても開く
-- **左下: BRANCHES** — NEW BRANCH (`switch -c`)、LOCAL / REMOTES / TAGS の一覧 (現在のブランチが点灯、右に upstream)。**ダブルクリックで切替** (`switch`。リモートは同名のローカルを作って追跡、タグは detach)
-- **中央: CHANGES ビュー** (Cmd+1) — UNSTAGED / STAGED の 2 表 (ST / PATH)。行クリックで下に diff、**ダブルクリックか Space でステージ / アンステージ**、STAGE ALL (`add -A`、Cmd+A) / UNSTAGE ALL (`reset`) / DISCARD (`restore` または untracked は `clean -f`、危険色の確認ダイアログでエージェントは人間留保)。下の DIFF は行番号 (旧 / 新)、追加 = 緑、削除 = 危険色、hunk 行に **STAGE HUNK / UNSTAGE HUNK** (`git apply --cached [-R]` にその hunk だけの patch を流す)
-- **中央: HISTORY ビュー** (Cmd+2) — `log --all --topo-order` の直近 500 件 (グラフ / HASH / SUBJECT / AUTHOR / WHEN、装飾付きは accent)。先頭列が**コミットグラフ**: `git::graph` が親リストからレーンを割り当て (第 1 親は同じレーンを引き継ぎ、第 2 親以降は待っているレーンか空きレーン、分岐線は分岐点の行まで伸びる gitk 流)、表の行ごとに線 (グロー付き) とノード (輪、HEAD は塗り + 脈動) を描く (`table::table_decorated` の行フック)。レーン色は accent / ok / warn / accent_dim の循環、8 レーンまで表示。行を選ぶと右にコミット詳細、その変更ファイルをクリックすると下に diff (`show <hash> -- path`)
-- **右: COMMIT** (CHANGES ビュー) — メッセージ欄と COMMIT (staged があり、メッセージが空でないとき。`commit -F -` で stdin から渡す。Cmd+Enter は欄にフォーカスがあっても効く)。HISTORY ビューでは選択コミットの件名 / 本文 / hash / author / date / parents / refs、COPY HASH、ファイル一覧
-- **ツールバー**: 再読込 (Cmd+R)、ビュー切替、PULL (`--ff-only`、behind 数付き) / PUSH (ahead 数付き。upstream が無ければ `-u origin <branch>`)
-- **下: GIT OUTPUT** — コマンドの標準出力 / 標準エラー (`error` / `fatal` = 危険色、`warning` / `hint` = 注意色)。帯のドラッグで高さ変更、チップのクリックで開閉
-
-| 操作 | キー |
-|---|---|
-| 選択移動 | ↑↓ (フォーカス中の表: UNSTAGED / STAGED / HISTORY) |
-| ステージ / アンステージ | Space または Enter (選択行)、ダブルクリック |
-| 全部ステージ | Cmd+A |
-| コミット | Cmd+Enter |
-| リポジトリを開く / 再読込 | Cmd+O / Cmd+R |
-| ビュー | Cmd+1 (CHANGES) / Cmd+2 (HISTORY) |
-| 設定 / 終了 | Cmd+, / Cmd+W |
-
-まだ無いもの ([#7](https://github.com/kobago/fuide/issues/7)): reset / force push / branch -D、マージ競合の解決、500 件より古いログの段階読み込み、MCP の Git 専用ツール。
-
-撮影フック: `FUIDE_DEV_DIALOG=diff|history|discard|open|branch|error|success`。テスト (`cargo test -p fuide-git`) は一時ディレクトリに `git init` した実リポジトリで回る (ネット不要。`GIT_CONFIG_GLOBAL=/dev/null` で署名などの個人設定を外す)。
-
-## 設定ウィンドウ (テーマ)
-
-各アプリとも `Cmd+,` かタイトルバーの歯車で設定ウィンドウが開く。パレット (CYAN / AMBER / GREEN)、角 (SQUARE / CHAMFER)、密度 (NORMAL / COMPACT)、窓の透過 (WINDOW: TRANSLUCENT / OPAQUE。OPAQUE は本体の地色 `bg_deep` を不透明にしてデスクトップが透けないようにする。窓自体は透過のままなので、枠の外側のグローや面取りした角はこれまで通り抜ける)、AGENT (MCP サーバーの OFF / ON、確認ダイアログを HUMAN / AGENT のどちらが押すか。下の「AI エージェントから操作する」) を選ぶと即座に本体へ反映され、ファイルに保存される。閉じるのは × / Esc / Cmd+W。
-
-- 設定ウィンドウは egui の **子 viewport** (別のネイティブウィンドウ、`show_viewport_deferred`) で、本体と同じ `fuide::Shell` を `tool_window()` (閉じるボタンのみ・リサイズなし・アイドルアニメ無し = 入力があったときだけ再描画) で描いている。フォントや Visuals は `egui::Context` 全体で共有なので、子ウィンドウで変えた瞬間に本体も変わる
-- 子 viewport は eframe 0.36 では撮影できない (immediate は `Screenshot` コマンドを捨てる。deferred は macOS でイベントループが約 1 秒止まったあと再描画が来なくなる)。撮影は `FUIDE_DEV_EMBED=1` で本体に埋め込んで行う (上の「開発用スクリーンショット」)
-- 保存先は macOS では `~/Library/Application Support/FUIDE/<app>.conf` (`file-manager.conf` / `brew.conf` / `player.conf`)、他 OS では `$XDG_CONFIG_HOME/fuide/` か `~/.config/fuide/`。`FUIDE_CONFIG_DIR` で置き換え可。中身は `palette=amber` のような `key=value` 行 (`palette` / `chamfer` / `compact` / `transparent` / `agent` / `agent_confirm`、ログパネルをドラッグすると `log_height`、ログパネルを開閉すると `log_open`) で、知らないキーは無視、足りないキーは既定値
-- 自作アプリで使うには `fuide::Settings` と `fuide::SettingsWindow` (下の「クレートの使い方」参照)
-
 ## AI エージェントから操作する (MCP)
 
-各アプリは **MCP サーバー** を内蔵している。設定ウィンドウ (`Cmd+,`) の AGENT パネルで `ON` にすると Unix ソケットで待ち受け、Claude Code などの MCP クライアントが画面を読み・クリックし・文字を打てる。人が見ている前で AI が FUI を操作するための機能なので、操作は画面に見える形で行われる: エージェント用の照準カーソルが目標までなめらかに移動し、押した部品が光り、直前の操作 (`CLICK ▸ OUTDATED`) がカーソル脇に出る。ステータスバーには `AGENT` ランプが点く (操作中は点滅)。
+各アプリは MCP サーバーを内蔵している。設定ウィンドウ (`Cmd+,`) の AGENT パネルで `ON` にすると Unix ソケットで待ち受け、Claude Code などの MCP クライアントが画面を読み・クリックし・文字を打てる。ツールと仕組みは fuide の README。
 
 ```sh
-# Claude Code に登録 (ラッパーを入れていれば `ffm --mcp` / `fuide-brew --mcp` でも良い)
 claude mcp add fuide-brew -- "/Applications/FUIDE Brew.app/Contents/MacOS/fuide-brew" --mcp
 claude mcp add ffm        -- "/Applications/FUIDE File Manager.app/Contents/MacOS/fuide-file-manager" --mcp
 claude mcp add fuide-player -- "/Applications/FUIDE Player.app/Contents/MacOS/fuide-player" --mcp
 claude mcp add fuide-activity-monitor -- "/Applications/FUIDE Activity Monitor.app/Contents/MacOS/fuide-activity-monitor" --mcp
-claude mcp add fuide-cad -- "/Applications/FUIDE CAD.app/Contents/MacOS/fuide-cad" --mcp
 # 開発中は cargo のバイナリでも同じ
 claude mcp add fuide-brew -- target/debug/fuide-brew --mcp
-```
-
-| ツール | 内容 |
-|---|---|
-| `observe` | アプリの状態要約 (表示中のビュー・選択・実行中のコマンド・ダイアログ・ログ末尾) と、画面上の操作できる部品の一覧 `[role] LABEL (state) @x,y`。最初に呼び、各操作のあとも返ってくる |
-| `click {label, nth?}` | ラベルの部品へカーソルを動かしてクリック。ラベルは `observe` に出る文字列そのまま (大文字)。完全一致 → 大文字小文字無視 → 部分一致の順で探す |
-| `type {text, label?, submit?}` | 入力欄に 1 文字ずつ打つ。`label` を付けるとその欄にフォーカスしてから。`submit` で最後に Enter |
-| `key {key, repeat?}` | `enter` / `escape` / `down` / `cmd+3` / `cmd+f` / `cmd+backspace` など |
-| `wait {ms}` | brew の実行やディレクトリ読込を待ってから観測を返す |
-| `screenshot {scale?, path?}` | 窓を PNG で返す (画面収録権限は不要。`FUIDE_SCREENSHOT` と同じ自己撮影)。`path` を付けると保存もする |
-| アプリ固有のツール | アプリが `Agent::set_tools` で足したもの (CAD の `add_feature` / `measure` など)。`tools/list` に並び、アプリ側で処理されて、結果の文の後に観測が付く。部品を押すわけではないので、代わりに**ツールが触った部品 (追加した行、書き換えた入力欄) へカーソルが飛んで光り**、脇に `TOOL ▸ ADD_FEATURE` と出る (`Agent::finish_tool` の `focus`)。`--mcp` ブリッジも同じ一覧を答える (`bridge::run_with_tools`) |
-
-仕組みと決めごと:
-- **クリックの注入**: egui の `Event::AccessKitActionRequest(Click)` を対象ウィジェットの id に向けて入れる。egui はこれを本物のクリックとして扱う (`Response::clicked()` が真になる) ので、座標を当てる必要がなく、部品が動いても壊れない。キーと文字は `Event::Key` / `Event::Text` で、`Cmd` などの修飾キーはそのフレームの `InputState::modifiers` に載せる
-- **部品の一覧**: kit の部品は `Response::widget_info` の代わりに `fuide::agent::describe` を呼び、アクセシビリティ木への登録と同時にエージェント用の一覧にも載る (ラベル・種類・状態・矩形)。`egui::TextEdit` のように自前で木に載る部品は `fuide::agent::note` で一覧だけに足す。アプリ側は `agent_state()` で部品だけでは分からない状態を文章にして渡す
-- **モーダル中は、ダイアログの部品しか操作できない** (前景レイヤーに部品があればそれだけを列挙する)。AccessKit 経由のクリックはモーダルの背後にも届いてしまうため
-- **確認ダイアログの人間留保**: 設定の CONFIRM DIALOGS が `HUMAN` (既定) の間、brew の `UPGRADE` / `UNINSTALL` / `INSTALL`、ファイルマネージャーの `MOVE TO TRASH` / `DELETE PERMANENTLY` のボタンと Enter はエージェントに拒否され、観測に `(human only)` と出る。`CANCEL` は押せる。`AGENT` にすると自分で確定できる。リネームは可逆なので留保しない
-- **通信**: アプリが `~/Library/Application Support/FUIDE/<app>.sock` (パスが長すぎるときは `$TMPDIR/fuide-<app>.sock`) で MCP (JSON-RPC 2.0、改行区切り) を話す。`<app> --mcp` は同じバイナリの stdio ブリッジで、`initialize` / `tools/list` は自分で答え、`tools/call` だけをソケットへ転送する。だから **Claude Code はアプリより先に起動していてよい**: 最初の呼び出しでアプリが無ければ `open -a` で起動して 12 秒待ち、AGENT が OFF なら「設定で ON にして」というエラーを返す
-- 設定ウィンドウ (子 viewport) 自体はエージェントから操作できない (人間の操作面)。`FUIDE_DEV_EMBED=1` で本体に埋め込んだときは操作できる
-- 依存は増やしていない: JSON は `serde_json`、PNG は macOS の `sips` で圧縮 (無ければ非圧縮 PNG を自前で書く)、base64 も自前
-
-```sh
-# 手で試す (nc は改行区切りの JSON-RPC をそのまま流せる)
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe","arguments":{}}}' \
-  | nc -U ~/Library/Application\ Support/FUIDE/brew.sock
 ```
 
 ## テスト
@@ -298,16 +180,13 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"o
 ```sh
 cargo test                                   # 単体 + UI テスト (オフラインで完結、数秒)
 cargo test -- --ignored                      # 実機依存 (Finder のゴミ箱など)
-UPDATE_SNAPSHOTS=true cargo test -p fuide    # 見た目が意図的に変わったときにスナップショットを更新
+UPDATE_SNAPSHOTS=true cargo test -p fuide-player  # 見た目が意図的に変わったときにスナップショットを更新
 ```
 
 | 層 | 場所 | 中身 |
 |---|---|---|
-| 単体 (fuide) | 各モジュールの `#[cfg(test)]` | `fmt` / `fontmetrics` / `settings` の純関数 |
-| UI (fuide) | `crates/fuide/tests/ui.rs` | [`egui_kittest`](https://docs.rs/egui_kittest) でシェル + パネル + 部品をヘッドレス描画。**アクセシビリティ木**でボタンやタブをラベルから探してクリック・状態確認、**wgpu スナップショット** (`tests/snapshots/*.png`、`kittest.toml` の閾値) で見た目の回帰を検出 |
 | 単体 (アプリ) | `apps/*/src/*.rs` | `fs.rs` / `brew.rs` の純関数。CAD は `mesh.rs` (Manifold: 穴あき板の体積、共平面の UNION / CUT / INTERSECT が厳密に一致、任意軸の円柱と回転、六角ボルト + 本物のねじ山の UNION、STL)、`kernel.rs` (truck: 同じ検証 + 公差のはしご、共平面のナッジ、panic の捕捉)、`expr.rs` (式)、`doc.rs` (JSON 往復、削除の拒否、フィールド)、`eval.rs` (穴あき板、抑制、エラーの伝播、変換、3 軸のねじ) |
 | 状態機械 (アプリ) | `apps/*/src/app/tests.rs` | `Explorer::with_context(ctx, dir, settings)` / `BrewApp::with_context(ctx, settings)` で `CreationContext` 無しにアプリを作り、`Action` を適用して状態・ログ・ダイアログを検証。ファイルマネージャーは一時ディレクトリで実ファイル操作 (一覧・ソート・フィルター・履歴・リネーム・完全削除・読取拒否) まで通す。ローダーやファイル操作のスレッドは `ui()` と同じく `poll_*` を回して待つ |
-| エージェント (fuide) | `crates/fuide/tests/agent.rs` | kittest 上で `Agent::submit` に `observe` / `click` / `type` / `key` / `screenshot` を流し、注入したクリックが kit の部品に届くこと、無効・人間留保・不明なラベルが拒否されること、PNG が返ることを検証 (ソケット無し) |
 | E2E (アプリ) | `apps/*/src/app/e2e.rs` | `egui_kittest` の `Harness::new_eframe` で本物の `Explorer` / `BrewApp` を起動し、アクセシビリティ木からラベルでクリック・キー入力・文字入力して状態を検証。brew はエージェント経由 (ビュー切替・行選択・Cmd+1・フィルター入力、確認ダイアログの人間留保と `agent_confirm` での確定) も通す。ファイルマネージャー: 行クリック → Enter で移動 / Backspace / Cmd+[ ] / 矢印、Cmd+F → 入力 → Esc、歯車 → パレット・角の変更が保存される。brew (偽 brew): ビュー切替 (タブ / Cmd+数字)、UPGRADE ALL → 確認 → 出力ストリーム → SUCCESS カード → ACKNOWLEDGE、検索ビューで Cmd+F → 入力 → Enter、Cmd+, → パレット保存。設定ウィンドウは kittest では埋め込み `egui::Window` になる。プレイヤー (偽バックエンド): Cmd+L → URL 入力 → Enter で再生開始、Space / PLAY / 矢印 / M / S / STOP、行クリック → Enter、PREVIOUS / NEXT、Backspace で外す、CLEAR。アクティビティモニター (偽ソース): タブ (クリック / Cmd+5) で列が変わる、行を名前でクリック → QUIT が有効に、↑ ↓ / Esc、Cmd+F → 入力 → Esc、QUIT → CANCEL / FORCE QUIT → Enter でプロセスが一覧から消える、root のプロセスは ERROR カード、5 タブ + ダイアログのスナップショット。CAD (実カーネル + wgpu ビューポート): BOX → CYLINDER → 欄に打ち替え → 行 → CUT → 行で穴あき板、`SIZE.Z` の打ち替えで体積が倍になり Cmd+Z で戻る、WIRE / TOP / 数字キー、Cmd+S のダイアログ、エージェントの専用ツール (`set_param` → `add_feature` ×3 → `measure`、拒否される `set_field` / `remove_feature`、`export` の上書き拒否、`document` / `open` / `view`)、サンプルのスナップショット (時計固定・ログ差し替え) |
 | 統合 (実エンジン) | `apps/player/tests/engine.rs` | `harness = false` でメインスレッドを確保し、実 AVFoundation で WAV (PCM、再生完了・再開) と MP4 (H.264 / AAC、メタデータ、フレームのテクスチャ化、速度・音量) と存在しないファイルの失敗を確認。`CFRunLoopRunInMode` でメインの run loop を回しながらポーリングする |
 | 結合 (brew) | 同上 + `apps/brew/fixtures/` | `FUIDE_BREW_BIN` を `fixtures/fake-brew.sh` に向け、本物の worker スレッドとストリーミング実行 (`==>` 行のログ流入、成功/失敗カード、完了後の在庫再取得、検索結果への導入状態の反映) を Homebrew 無しで検証。`info-installed.json` が在庫のフィクスチャ |
@@ -322,15 +201,12 @@ UPDATE_SNAPSHOTS=true cargo test -p fuide    # 見た目が意図的に変わっ
 - 同じ文字列が複数の場所に出るとき (選択した行の名前がインスペクターにも出る等) は `get_by_role_and_label(Role::Button, ..)` で絞る
 - E2E が見つけた実バグ: egui は Esc でフォーカスを先に外すので `has_focus()` では Esc を拾えない → `lost_focus()` も見る (フィルターの Esc クリアが動いていなかった)。brew の検索ビューでは `Cmd+F` を検索欄に向ける
 
-## 再描画レートとウィンドウマネージャー
-
-シェルのアイドルアニメーション（枠のパルス・走査帯）は **20 fps** で再描画する（`fuide::shell::IDLE_FPS`、環境変数 `FUIDE_IDLE_FPS` で変更、`0` = 毎フレーム）。毎フレーム再描画すると macOS では Rectangle などのスナップ操作で 200〜500 ms 遅れる（[winit #3644](https://github.com/rust-windowing/winit/issues/3644)、[kobago/fuide#1](https://github.com/kobago/fuide/issues/1)）。ダイアログのフェードや brew 出力の流入など一時的なアニメーションは従来どおり即時に再描画する。`FUIDE_DEV_FRAMELOG=1` で 30 フレームごとの時刻を stderr に出せる。
 
 ## 配布 (.app / DMG、Apple Silicon)
 
 ```sh
 cargo install cargo-bundle          # 初回のみ
-./scripts/release.sh                # dist/FUIDE File Manager.{app,dmg}, dist/FUIDE Brew.{app,dmg}, Player, Activity Monitor, CAD
+./scripts/release.sh                # dist/FUIDE File Manager.{app,dmg}, dist/FUIDE Brew.{app,dmg}, Player, Activity Monitor
 ./scripts/release.sh fuide-brew       # 1 本だけ
 ```
 
@@ -343,7 +219,7 @@ cargo install cargo-bundle          # 初回のみ
 ## ターミナルから開く (`open` 風)
 
 ```sh
-./scripts/install-cli.sh            # /opt/homebrew/bin (書込可なら) or ~/.local/bin に ffm / fuide-brew / fuide-player / fuide-activity-monitor / fuide-cad を置く
+./scripts/install-cli.sh            # /opt/homebrew/bin (書込可なら) or ~/.local/bin に ffm / fuide-brew / fuide-player / fuide-activity-monitor を置く
 ffm                                 # カレントディレクトリを開く
 ffm ~/Downloads                     # 指定ディレクトリを開く (相対パス可)
 fuide-brew
@@ -353,54 +229,3 @@ fuide-brew
 - `ffm` は `open -na "FUIDE File Manager" --args <絶対パス>` を呼ぶだけ。LaunchServices 経由なので Dock に出て、ターミナルを閉じても残る。`-n` で毎回新しいウィンドウ（プロセス）が開く
 - `open` は起動先の cwd を `/` にするため、ラッパー側で `cd "$dir" && pwd -P` で絶対化してから渡している
 - アプリは `/Applications` か `~/Applications` に入れておく（DMG からドラッグ）。`open` は LaunchServices のデータベースからバンドル名で探すので、パスは不要
-
-## 他のプロジェクトから `fuide` を使う (git 依存)
-
-`fuide` はまだ crates.io には公開していないので、GitHub の URL を `Cargo.toml` に書いて取り込む。ワークスペース内の `crates/fuide` は Cargo がパッケージ名で見つけるので、パスの指定は不要。
-
-```toml
-[dependencies]
-egui = "0.36.1"
-eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "wgpu"] }
-fuide = { git = "https://github.com/kobago/fuide" }
-```
-
-- 再現性のため、コミットかタグで固定するのを推奨: `{ git = "...", rev = "65ca5ba" }` / `{ git = "...", tag = "v0.1.0" }`。`branch = "main"` で追従もできる。何も書かなくても `Cargo.lock` にコミットが記録され、`cargo update` で進む
-- リポジトリが private の間は認証が要る。SSH が簡単: `fuide = { git = "ssh://git@github.com/kobago/fuide" }`。HTTPS を使うなら `~/.cargo/config.toml` に `[net] git-fetch-with-cli = true` を入れてシステムの git (credential helper) に任せる
-- `egui` / `eframe` は `fuide` と同じ 0.36 系に揃える (ずれると型が一致せずコンパイルできない)
-- crates.io に公開したら `fuide = "0.1"` に差し替えるだけで移行できる
-
-## `fuide` クレートの使い方 (最小)
-
-```rust
-fn new(cc: &eframe::CreationContext<'_>) -> Self {
-    fuide::theme::install(&cc.egui_ctx, fuide::Palette::cyan(), vec![]);
-    ..
-}
-fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-    fuide::Shell::new("My Tool").subtitle("v0.1").lamp("LINK OK", pal.ok, false)
-        .show(ui, |ui| {
-            fuide::Panel::new("Telemetry").show_rect(ui, rect, |ui| { .. });
-        });
-}
-```
-
-`NativeOptions.viewport` は `with_decorations(false).with_transparent(true)`、`App::clear_color` は `[0.0; 4]` にする (設定の WINDOW = OPAQUE でも窓は透過のまま。`Settings::apply` がパレットの `bg_deep` を `Palette::opaque` で不透明にして本体を塗りつぶす)。`Shell` は Cmd+W で自分のウィンドウに `ViewportCommand::Close` を送る (本体なら終了、`tool_window()` は自前で閉じる)。
-
-設定ウィンドウを付けるなら、起動時に `Settings::load("my-tool")` で読んで `install` に渡し、毎フレームの最後に `SettingsWindow::show` を呼ぶ:
-
-```rust
-let settings = fuide::Settings::load("my-tool").unwrap_or_else(|| fuide::Settings::new(fuide::PaletteKind::Cyan));
-fuide::theme::install(&cc.egui_ctx, settings.palette.palette(), vec![]);
-settings.apply(&cc.egui_ctx);
-..
-let out = fuide::Shell::new("My Tool").settings_button(true).show_full(ui, |ui| { .. });
-if out.settings_clicked { self.settings_win.open(); }
-if self.settings_win.show(ui.ctx(), &mut self.settings, "My Tool") {
-    self.settings.save("my-tool").ok();   // 変更があったフレームだけ true
-}
-```
-
-文字サイズは `fuide::TypeScale` に集約 (既定 `NORMAL`: 本文 13.5px / ラベル・見出し 13px / 脚注 12px / 行高 24px、Finder の 13px 相当)。密度を上げたいときは `theme::set_type_scale(&ctx, TypeScale::COMPACT)` か `.scaled(f)`。egui 標準の Cmd +/- でも全体をズームできる。
-
-角は既定で直角。45° のチャンファーが欲しいときだけ `fuide::theme::set_corners(&ctx, fuide::Corners::CHAMFER)` を呼ぶ (窓 26 / パネル 14 / タブ 12 / ボタン 7 px)。
